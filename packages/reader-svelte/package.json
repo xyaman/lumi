@@ -1,0 +1,37 @@
+{
+  "name": "@lumi/reader-svelte",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Svelte 5 wrapper for @lumi/reader-core: mounts the reader engine and bridges the neutral store + SettingsPort to runes",
+  "type": "module",
+  "types": "./src/index.ts",
+  "svelte": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "svelte": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./Reader.svelte": "./src/Reader.svelte"
+  },
+  "files": ["src"],
+  "sideEffects": ["*.svelte"],
+  "scripts": {
+    "build": "echo 'reader-svelte is consumed from source (no build step during pre-release)'",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@lumi/epub": "workspace:*",
+    "@lumi/reader-core": "workspace:*"
+  },
+  "peerDependencies": {
+    "svelte": "^5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "svelte": "^5.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
