@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { Book, Section } from "@lumi/epub";
+import type { Book, Section } from "@lostcoords/lumi-epub";
 import { buildPosition } from "../src/index.js";
 
 // Minimal Book fixture. `spineIndex` addresses book.sections by position (flow

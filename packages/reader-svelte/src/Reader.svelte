@@ -2,8 +2,8 @@
 // framework-agnostic controller; this component owns the host element, the
 // mount/destroy lifecycle, and the reactive effect that forwards settings changes.
 
-import type { Book, Section } from "@lumi/epub";
-import type { ReaderExtension, ReaderStore, SettingsPort } from "@lumi/reader-core";
+import type { Book, Section } from "@lostcoords/lumi-epub";
+import type { ReaderExtension, ReaderStore, SettingsPort } from "@lostcoords/lumi-reader-core";
 import { onMount } from "svelte";
 import { ReaderController } from "./controller";
 

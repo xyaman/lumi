@@ -7,8 +7,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import type { Book } from "@lumi/epub";
-import type { ReaderSettings, ReaderState, ReaderStore } from "@lumi/reader-core";
+import type { Book } from "@lostcoords/lumi-epub";
+import type { ReaderSettings, ReaderState, ReaderStore } from "@lostcoords/lumi-reader-core";
 import { type CreateRenderer, ReaderController, type ReaderRenderer } from "../src/controller";
 
 // ── fakes ─────────────────────────────────────────────────────────────────────

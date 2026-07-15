@@ -2,7 +2,7 @@
 // the renderer reads `store.getState()` and reports geometry via
 // `setPaginatedMetrics()` / `setRestoreStatus()`.
 
-import { type Book, type Epub, resolveHref, type Section, type SpineItem } from "@lumi/epub";
+import { type Book, type Epub, resolveHref, type Section, type SpineItem } from "@lostcoords/lumi-epub";
 import { type AtomUnit, atomToPoint, collectAtomUnits } from "./atomMap";
 import { buildPosition } from "./positionBuilder";
 import type { PointerContext, ReaderExtension, RenderContext, SettingsPort } from "./ports";

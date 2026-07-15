@@ -1,5 +1,5 @@
 // Client-side atom ⇄ DOM mapping. Re-walks the rendered DOM by the same rules as
-// @lumi/epub's `walkAtoms` so live DOM points resolve to identical atom offsets.
+// @lostcoords/lumi-epub's `walkAtoms` so live DOM points resolve to identical atom offsets.
 
 const ELEMENT_NODE = 1;
 const TEXT_NODE = 3;

@@ -8,10 +8,10 @@
       },
     },
     "examples/playground": {
-      "name": "@lumi/playground",
+      "name": "@lostcoords/lumi-playground",
       "version": "0.0.0",
       "dependencies": {
-        "@lumi/epub": "workspace:*",
+        "@lostcoords/lumi-epub": "workspace:*",
       },
       "devDependencies": {
         "typescript": "^5.7.2",
@@ -19,8 +19,8 @@
       },
     },
     "packages/epub": {
-      "name": "@lumi/epub",
-      "version": "0.0.0",
+      "name": "@lostcoords/lumi-epub",
+      "version": "0.1.0",
       "devDependencies": {
         "@types/node": "^22.10.0",
         "@xmldom/xmldom": "^0.9.8",
@@ -29,10 +29,10 @@
       },
     },
     "packages/reader-core": {
-      "name": "@lumi/reader-core",
-      "version": "0.0.0",
+      "name": "@lostcoords/lumi-reader-core",
+      "version": "0.1.0",
       "dependencies": {
-        "@lumi/epub": "workspace:*",
+        "@lostcoords/lumi-epub": "workspace:*",
       },
       "devDependencies": {
         "@happy-dom/global-registrator": "^15.11.0",
@@ -42,11 +42,11 @@
       },
     },
     "packages/reader-react": {
-      "name": "@lumi/reader-react",
-      "version": "0.0.0",
+      "name": "@lostcoords/lumi-reader-react",
+      "version": "0.1.0",
       "dependencies": {
-        "@lumi/epub": "workspace:*",
-        "@lumi/reader-core": "workspace:*",
+        "@lostcoords/lumi-epub": "workspace:*",
+        "@lostcoords/lumi-reader-core": "workspace:*",
         "use-sync-external-store": "^1.6.0",
       },
       "devDependencies": {
@@ -65,11 +65,11 @@
       },
     },
     "packages/reader-svelte": {
-      "name": "@lumi/reader-svelte",
+      "name": "@lostcoords/lumi-reader-svelte",
       "version": "0.0.0",
       "dependencies": {
-        "@lumi/epub": "workspace:*",
-        "@lumi/reader-core": "workspace:*",
+        "@lostcoords/lumi-epub": "workspace:*",
+        "@lostcoords/lumi-reader-core": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "^22.10.0",
@@ -147,15 +147,15 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
-    "@lumi/epub": ["@lumi/epub@workspace:packages/epub"],
+    "@lostcoords/lumi-epub": ["@lostcoords/lumi-epub@workspace:packages/epub"],
 
-    "@lumi/playground": ["@lumi/playground@workspace:examples/playground"],
+    "@lostcoords/lumi-playground": ["@lostcoords/lumi-playground@workspace:examples/playground"],
 
-    "@lumi/reader-core": ["@lumi/reader-core@workspace:packages/reader-core"],
+    "@lostcoords/lumi-reader-core": ["@lostcoords/lumi-reader-core@workspace:packages/reader-core"],
 
-    "@lumi/reader-react": ["@lumi/reader-react@workspace:packages/reader-react"],
+    "@lostcoords/lumi-reader-react": ["@lostcoords/lumi-reader-react@workspace:packages/reader-react"],
 
-    "@lumi/reader-svelte": ["@lumi/reader-svelte@workspace:packages/reader-svelte"],
+    "@lostcoords/lumi-reader-svelte": ["@lostcoords/lumi-reader-svelte@workspace:packages/reader-svelte"],
 
     "@rollup/rollup-android-arm-eabi": ["@rollup/rollup-android-arm-eabi@4.62.2", "", { "os": "android", "cpu": "arm" }, "sha512-6o7ZLZK+BeenkZCFNDXqpbjw9bD6nuWonvS/lwQJp7NoVVxm6p3qE7qQ5jGuBjiFsgvqjD8mZAU5oWxTmbOeOg=="],
 

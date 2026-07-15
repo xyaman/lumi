@@ -2,7 +2,7 @@
 // root under a single content shell, each in a per-spine <section> wrapper so TOC
 // jumps, offsets, and progress stay stable.
 
-import { type Book, type Epub, resolveHref, type Section, type SpineItem } from "@lumi/epub";
+import { type Book, type Epub, resolveHref, type Section, type SpineItem } from "@lostcoords/lumi-epub";
 import { type AtomUnit, collectAtomUnits } from "./atomMap";
 import { buildPosition } from "./positionBuilder";
 import type { PointerContext, ReaderExtension, RenderContext, SettingsPort } from "./ports";

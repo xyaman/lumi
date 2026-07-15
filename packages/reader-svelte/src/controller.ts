@@ -8,7 +8,7 @@
 // scheduling the way Svelte effects collapse theirs — so we render once, not once
 // per intermediate set.
 
-import type { Book, Section } from "@lumi/epub";
+import type { Book, Section } from "@lostcoords/lumi-epub";
 import {
   ContinuousRenderer,
   PaginatedRenderer,
@@ -17,7 +17,7 @@ import {
   type ReaderState,
   type ReaderStore,
   type SettingsPort,
-} from "@lumi/reader-core";
+} from "@lostcoords/lumi-reader-core";
 
 /** Renderer surface the controller drives (both concrete renderers satisfy it; tests inject a fake). `applyPage` is paginated-only; `scheduleLayoutRefresh`/`scrollToCurrentTarget` are continuous-only; `applyPendingRestore` is shared — all flow-specific methods are optional and only called on the matching flow. */
 export interface ReaderRenderer {

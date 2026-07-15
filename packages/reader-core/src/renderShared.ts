@@ -1,7 +1,7 @@
 // Shared render building blocks: load a spine doc into a live DOM, rewrite in-archive
 // references to blob URLs, collect publisher CSS, and provide reader-owned host/user stylesheets.
 
-import { dirname, type Epub, resolveHref, type SpineItem } from "@lumi/epub";
+import { dirname, type Epub, resolveHref, type SpineItem } from "@lostcoords/lumi-epub";
 import { loadEpubCss, processCssText } from "./css";
 
 /** Top padding (px) applied around the visible content. */

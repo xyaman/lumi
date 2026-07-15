@@ -2,7 +2,7 @@
 // (a lone page shifts parity), so feed the full page list — never compute
 // spread boundaries locally.
 
-import type { Section } from "@lumi/epub";
+import type { Section } from "@lostcoords/lumi-epub";
 
 /** One page. `localPage` is the 0-based page number within its section. */
 export type PageRef = {
@@ -25,7 +25,7 @@ export type SectionSpreadMeta = {
   layout: "reflowable" | "pre-paginated";
 };
 
-/** Project an `@lumi/epub` `Section` to the metadata `planSpreads` consumes. */
+/** Project an `@lostcoords/lumi-epub` `Section` to the metadata `planSpreads` consumes. */
 export function toSpreadMeta(section: Section): SectionSpreadMeta {
   return {
     spineIndex: section.spineIndex,

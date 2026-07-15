@@ -6,16 +6,16 @@ Framework-agnostic EPUB reader engine, plus thin per-framework wrappers.
 
 | Package | What |
 |---|---|
-| `@lumi/epub` | Parse `.epub` → `Book` (atom-offset model). Zero deps, browser-first. |
-| `@lumi/reader-core` | Paginated + continuous render engine, neutral store, ports. |
-| `@lumi/reader-svelte` | Svelte 5 wrapper. |
+| `@lostcoords/lumi-epub` | Parse `.epub` → `Book` (atom-offset model). Zero deps, browser-first. |
+| `@lostcoords/lumi-reader-core` | Paginated + continuous render engine, neutral store, ports. |
+| `@lostcoords/lumi-reader-svelte` | Svelte 5 wrapper. |
 
 ## Use it (Svelte)
 
 ```svelte
 <script>
-  import { Reader } from "@lumi/reader-svelte";
-  // store: createReaderStore({ ports }) from @lumi/reader-core
+  import { Reader } from "@lostcoords/lumi-reader-svelte";
+  // store: createReaderStore({ ports }) from @lostcoords/lumi-reader-core
   // settings: your app's reactive SettingsPort
 </script>
 
@@ -25,7 +25,7 @@ Framework-agnostic EPUB reader engine, plus thin per-framework wrappers.
 `Reader` mounts the engine and forwards settings changes. The app owns the `store`
 and drives navigation directly (`store.nextPage()`, `store.jumpToHref(...)`). Props
 are captured at mount — to reset against a new store, remount with `{#key store}`.
-For prop typechecking, import `@lumi/reader-svelte/Reader.svelte` directly.
+For prop typechecking, import `@lostcoords/lumi-reader-svelte/Reader.svelte` directly.
 
 ## Develop
 

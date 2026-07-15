@@ -4,7 +4,7 @@
 //      <html>/<body> for author rules to target.
 //   3. `url(...)` references are mapped to blob URLs for in-archive assets.
 
-import { dirname, type Epub, resolveHref } from "@lumi/epub";
+import { dirname, type Epub, resolveHref } from "@lostcoords/lumi-epub";
 
 /** Load a stylesheet by absolute href, recursively inlining `@import` and rewriting URLs. */
 export async function loadEpubCss(

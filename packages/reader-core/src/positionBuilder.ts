@@ -1,4 +1,4 @@
-import type { Book } from "@lumi/epub";
+import type { Book } from "@lostcoords/lumi-epub";
 import type { ReaderPosition } from "./types";
 
 /**

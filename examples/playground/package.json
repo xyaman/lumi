@@ -1,5 +1,5 @@
 {
-  "name": "@lumi/playground",
+  "name": "@lostcoords/lumi-playground",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@lumi/epub": "workspace:*"
+    "@lostcoords/lumi-epub": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.2",

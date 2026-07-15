@@ -1,6 +1,6 @@
-// Verifies the client atom walk matches @lumi/epub's walkAtoms, plus atom ⇄ DOM
+// Verifies the client atom walk matches @lostcoords/lumi-epub's walkAtoms, plus atom ⇄ DOM
 // round-trips. The atom-count cases deliberately mirror the expected values in
-// @lumi/epub/test/section-builder.test.ts — if the walk rules diverge in either
+// @lostcoords/lumi-epub/test/section-builder.test.ts — if the walk rules diverge in either
 // package, the mirrored numbers here catch it.
 
 import "./helpers/dom.js";
@@ -17,7 +17,7 @@ function container(html: string): HTMLElement {
 
 const atomsOf = (html: string) => countAtoms(container(html));
 
-describe("atom counting (parity with @lumi/epub walkAtoms)", () => {
+describe("atom counting (parity with @lostcoords/lumi-epub walkAtoms)", () => {
   it("counts base text by code point", () => {
     assert.equal(atomsOf("<p>あいうえお</p>"), 5);
   });

@@ -2,7 +2,7 @@
 // calls them. This is the ONLY seam through which reader-core touches storage,
 // network, or app settings — it never imports from the app.
 
-import type { Book, Section } from "@lumi/epub";
+import type { Book, Section } from "@lostcoords/lumi-epub";
 import type { AtomUnit } from "./atomMap";
 import type { HighlightSpan, ReaderPosition, TokenChip } from "./types";
 

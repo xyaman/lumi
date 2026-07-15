@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { ReaderSettings, ReaderState, ReaderStore, SettingsPort } from "@lumi/reader-core";
+import type { ReaderSettings, ReaderState, ReaderStore, SettingsPort } from "@lostcoords/lumi-reader-core";
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import React, { act, StrictMode } from "react";

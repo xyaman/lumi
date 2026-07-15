@@ -1,4 +1,4 @@
-// Reader-core domain types. Positions and highlights ride @lumi/epub's atom
+// Reader-core domain types. Positions and highlights ride @lostcoords/lumi-epub's atom
 // coordinate (one atom per non-whitespace code point, one per replaced element),
 // so they are independent of font, viewport, and pagination. Persistence/sync
 // fields are app concerns; the host app extends these shapes via the ports.

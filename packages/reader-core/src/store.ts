@@ -1,7 +1,7 @@
 // Framework-neutral reader store. A plain pub/sub state machine owning load →
 // restore → navigate. `spineIndex` is the flow index into `book.sections`.
 
-import { type Book, buildBook, parseEpub } from "@lumi/epub";
+import { type Book, buildBook, parseEpub } from "@lostcoords/lumi-epub";
 import { buildPosition } from "./positionBuilder";
 import type { ReaderPorts } from "./ports";
 import type { FlowMode, ReaderPosition } from "./types";

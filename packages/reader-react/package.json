@@ -1,28 +1,41 @@
 {
-  "name": "@lumi/reader-react",
-  "version": "0.0.0",
-  "private": true,
-  "description": "React 19 wrapper for @lumi/reader-core: mounts the reader engine and bridges the neutral store + SettingsPort to hooks",
+  "name": "@lostcoords/lumi-reader-react",
+  "version": "0.1.0",
+  "description": "React 19 wrapper for @lostcoords/lumi-reader-core: mounts the reader engine and bridges the neutral store + SettingsPort to hooks",
   "type": "module",
-  "main": "./src/index.ts",
-  "module": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "import": "./src/index.ts"
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     }
   },
-  "files": ["src"],
+  "files": ["dist", "src"],
   "sideEffects": false,
+  "license": "MIT",
+  "author": "xyaman",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xyaman/lumi.git",
+    "directory": "packages/reader-react"
+  },
+  "homepage": "https://github.com/xyaman/lumi#readme",
+  "bugs": "https://github.com/xyaman/lumi/issues",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "echo 'reader-react is consumed from source (no build step during pre-release)'",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --tsconfig tsconfig.json --test test/*.test.ts test/*.test.tsx"
+    "test": "tsx --conditions development --test test/*.test.ts test/*.test.tsx"
   },
   "dependencies": {
-    "@lumi/epub": "workspace:*",
-    "@lumi/reader-core": "workspace:*",
+    "@lostcoords/lumi-epub": "workspace:*",
+    "@lostcoords/lumi-reader-core": "workspace:*",
     "use-sync-external-store": "^1.6.0"
   },
   "peerDependencies": {

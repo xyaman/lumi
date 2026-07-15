@@ -1,8 +1,8 @@
 // Thin React shell over `ReaderController`: owns the host element, mount/destroy,
 // and the effect forwarding settings changes.
 
-import type { Book, Section } from "@lumi/epub";
-import type { ReaderExtension, ReaderStore, SettingsPort } from "@lumi/reader-core";
+import type { Book, Section } from "@lostcoords/lumi-epub";
+import type { ReaderExtension, ReaderStore, SettingsPort } from "@lostcoords/lumi-reader-core";
 import { useEffect, useRef } from "react";
 import { ReaderController } from "./controller";
 

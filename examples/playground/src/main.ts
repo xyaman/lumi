@@ -1,4 +1,4 @@
-import { type Book, buildBook, type Chapter, type Epub, parseEpub } from "@lumi/epub";
+import { type Book, buildBook, type Chapter, type Epub, parseEpub } from "@lostcoords/lumi-epub";
 
 const drop = document.getElementById("drop") as HTMLLabelElement;
 const input = document.getElementById("file") as HTMLInputElement;
