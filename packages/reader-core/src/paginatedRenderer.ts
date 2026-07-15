@@ -24,7 +24,10 @@ import type { ReaderPosition } from "./types";
 const TEXT_NODE = 3;
 
 const SPACER_CSS = "position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;opacity:0";
+const MARKER_CSS = "display:block;width:0;height:0;margin:0;padding:0;border:0";
 const MIN_COLUMN_MAIN_SIZE_PX = 120;
+/** Cap on waiting for fonts/images before measuring, so a slow resource can't stall a render. */
+const LAYOUT_SETTLE_TIMEOUT_MS = 2000;
 
 const SPREAD_CSS = `
 :where(.lumi-spread-stage) {
@@ -320,6 +323,10 @@ export class PaginatedRenderer {
       cs.columnFill = "auto";
     }
 
+    // Fonts and images lay out asynchronously; measuring before they settle mis-counts pages.
+    await this.waitForLayout(content);
+    if (myToken !== this.renderToken) return;
+
     // Measure overflow; extend a trailing spacer so pageCount * pageSize == scrollSize.
     const overflowX = Math.max(content.scrollWidth - content.clientWidth, 0);
     const overflowY = Math.max(content.scrollHeight - content.clientHeight, 0);
@@ -340,7 +347,21 @@ export class PaginatedRenderer {
 
     const pageSize = Math.max(axis === "x" ? content.clientWidth : content.clientHeight, 1);
     const scrollSize = Math.max(axis === "x" ? content.scrollWidth : content.scrollHeight, pageSize);
-    const pageCount = Math.max(Math.ceil(scrollSize / pageSize), 1);
+
+    // Count pages from a zero-size end marker's position, not scrollSize: multicol column
+    // quantization and overflowing elements inflate scrollSize into unreachable phantom pages.
+    let pageCount: number;
+    if (isImageOnly) {
+      pageCount = Math.max(Math.ceil(scrollSize / pageSize), 1);
+    } else {
+      const marker = this.doc.createElement("div");
+      marker.style.cssText = MARKER_CSS;
+      content.appendChild(marker);
+      void content.offsetWidth;
+      const markerOffset = this.rectPageOffset(content, marker.getBoundingClientRect());
+      content.removeChild(marker);
+      pageCount = Math.max(Math.ceil((markerOffset - 1) / pageSize), 1);
+    }
     const trailing = pageCount * pageSize - scrollSize;
     if (trailing > 0) {
       const ts = spacer.style;
@@ -387,6 +408,30 @@ export class PaginatedRenderer {
     this.notifyRender(book, section, content, isImageOnly, myToken);
 
     await this.applyPendingRestore();
+  }
+
+  /** Wait for fonts and images to settle before measuring, bounded so a slow resource can't stall. */
+  private async waitForLayout(content: HTMLElement): Promise<void> {
+    const waits: Promise<unknown>[] = [];
+    const fonts = this.doc.fonts;
+    if (fonts?.ready) waits.push(fonts.ready);
+    for (const img of content.querySelectorAll("img")) {
+      if (img.complete) continue;
+      waits.push(
+        typeof img.decode === "function"
+          ? img.decode().catch(() => undefined)
+          : new Promise<void>((resolve) => {
+              const done = (): void => resolve();
+              img.addEventListener("load", done, { once: true });
+              img.addEventListener("error", done, { once: true });
+            }),
+      );
+    }
+    if (waits.length === 0) return;
+    await Promise.race([
+      Promise.all(waits),
+      new Promise<void>((resolve) => setTimeout(resolve, LAYOUT_SETTLE_TIMEOUT_MS)),
+    ]);
   }
 
   private async renderSvgSpread(book: Book, rightSection: Section, leftSection: Section): Promise<void> {
