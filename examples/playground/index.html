@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>@lumi/epub playground</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; padding: 24px; max-width: 1000px; }
+      h1 { font-size: 18px; }
+      .drop { border: 2px dashed currentColor; border-radius: 10px; padding: 32px; text-align: center; opacity: 0.7; cursor: pointer; }
+      .drop.over { opacity: 1; background: color-mix(in srgb, currentColor 8%, transparent); }
+      table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+      th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid color-mix(in srgb, currentColor 20%, transparent); white-space: nowrap; }
+      td.wrap { white-space: normal; word-break: break-all; }
+      .meta dt { font-weight: 700; }
+      .meta dd { margin: 0 0 6px 0; }
+      .warn { color: #b8860b; }
+      .err { color: #d33; white-space: pre-wrap; }
+      section { margin-top: 24px; }
+      .toc ul { margin: 0; padding-left: 18px; }
+      .muted { opacity: 0.6; }
+    </style>
+  </head>
+  <body>
+    <h1>@lumi/epub playground</h1>
+    <p class="muted">Parses an .epub entirely in the browser via <code>parseEpub</code> + <code>buildBook</code>. No server.</p>
+    <label class="drop" id="drop">
+      Drop an .epub here, or click to choose
+      <input id="file" type="file" accept=".epub,application/epub+zip" hidden />
+    </label>
+    <div id="out"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
