@@ -114,8 +114,10 @@ export class PaginatedRenderer {
 
   /** Tear down observers, listeners, blob URLs, and extensions. */
   destroy(): void {
+    this.renderToken++;
     if (this.resizeObserver) this.resizeObserver.disconnect();
     if (this.resizeTimer != null) clearTimeout(this.resizeTimer);
+    if (this.shadow) this.shadow.removeEventListener("click", this.onShadowClick);
     for (const ext of this.extensions) {
       ext.onShadow?.(null);
       ext.onDestroy?.();
@@ -124,6 +126,8 @@ export class PaginatedRenderer {
     this.blobUrls.length = 0;
     this.contentEl = undefined;
     this.currentSection = undefined;
+    this.host = undefined;
+    this.shadow = undefined;
   }
 
   private observeResize(host: HTMLElement): void {
