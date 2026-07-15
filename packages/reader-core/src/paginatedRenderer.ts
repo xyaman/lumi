@@ -408,6 +408,9 @@ export class PaginatedRenderer {
     this.notifyRender(book, section, content, isImageOnly, myToken);
 
     await this.applyPendingRestore();
+
+    // Report the landing position: a chapter (re)render lands a page but only page turns report otherwise.
+    if (myToken === this.renderToken) this.reportCurrentPosition();
   }
 
   /** Wait for fonts and images to settle before measuring, bounded so a slow resource can't stall. */
