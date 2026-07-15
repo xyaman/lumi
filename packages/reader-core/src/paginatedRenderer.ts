@@ -3,6 +3,7 @@
 // `setPaginatedMetrics()` / `setRestoreStatus()`.
 
 import { type Book, type Epub, resolveHref, type Section, type SpineItem } from "@lostcoords/lumi-epub";
+import { AnnotationPainter, atomAtClientPoint, type PaintSection, spanCoversAtom } from "./annotations";
 import { type AtomUnit, atomToPoint, collectAtomUnits } from "./atomMap";
 import { buildPosition } from "./positionBuilder";
 import type { PointerContext, ReaderExtension, RenderContext, SettingsPort } from "./ports";
@@ -85,6 +86,7 @@ export class PaginatedRenderer {
   private contentEl: HTMLElement | undefined;
   private currentSection: Section | undefined;
   private pageGeometry: PageGeometry = { axis: "y", scrollLeftSign: 1 };
+  private readonly painter: AnnotationPainter;
   private readonly blobUrls: string[] = [];
 
   // Closure state read by the shadow click listener; refreshed before each mount.
@@ -102,6 +104,7 @@ export class PaginatedRenderer {
     this.extensions = options.extensions ?? [];
     this.spreadPartnerFor = options.spreadPartnerFor;
     this.doc = options.doc ?? document;
+    this.painter = new AnnotationPainter(this.doc);
   }
 
   /** Mount into `host`, creating the shadow root on first call. */
@@ -118,6 +121,7 @@ export class PaginatedRenderer {
   /** Tear down observers, listeners, blob URLs, and extensions. */
   destroy(): void {
     this.renderToken++;
+    this.painter.destroy();
     if (this.resizeObserver) this.resizeObserver.disconnect();
     if (this.resizeTimer != null) clearTimeout(this.resizeTimer);
     if (this.shadow) this.shadow.removeEventListener("click", this.onShadowClick);
@@ -411,6 +415,7 @@ export class PaginatedRenderer {
 
     // Report the landing position: a chapter (re)render lands a page but only page turns report otherwise.
     if (myToken === this.renderToken) this.reportCurrentPosition();
+    if (myToken === this.renderToken) this.paintAnnotations();
   }
 
   /** Wait for fonts and images to settle before measuring, bounded so a slow resource can't stall. */
@@ -558,6 +563,7 @@ export class PaginatedRenderer {
     ) {
       this.reportCurrentPosition();
     }
+    this.paintAnnotations();
   }
 
   private applyPageScroll(el: HTMLElement, pageIndex: number): void {
@@ -577,18 +583,51 @@ export class PaginatedRenderer {
     content.classList.toggle("lumi-force-colors", this.settings.get().forceTextColor);
   }
 
+  /** Repaint host annotations (highlights + page marks) for the current section against the live page scroll. */
+  private paintAnnotations(): void {
+    const content = this.contentEl;
+    const section = this.currentSection;
+    const host = this.host;
+    const shadow = this.shadow;
+    if (!content || !section || !host || !shadow) return;
+    const sections: PaintSection[] = [
+      { spineIndex: this.store.getState().spineIndex, content, atomCount: section.endAtom - section.startAtom },
+    ];
+    const { highlights } = this.store.getState();
+    this.painter.paintHighlights(sections, highlights);
+    // The overlay lives in the shadow (the host carries the shadow root, so its
+    // light-DOM children would not render); marks lay out against the slot.
+    // Paginated is page-aware: the marker sits at the page corner, not the atom's line.
+    this.painter.paintMarks(shadow, host, sections, highlights, "page");
+  }
+
+  /** Cheap repaint path used when only the host's highlight set changed (no reflow). */
+  applyHighlights(): void {
+    this.paintAnnotations();
+  }
+
   /** Land on the restore target's page within the current chapter. */
   async applyPendingRestore(): Promise<void> {
     const content = this.contentEl;
     if (!content) return;
     const st = this.store.getState();
     const restore = st.restore;
-    if (restore.status !== "pending" || !restore.point || restore.point.locator.spineIndex !== st.spineIndex) return;
+    if (restore.status !== "pending" || !restore.point) return;
+    // The user navigated away from the restore target before it applied. Cancel the
+    // restore instead of leaving it "pending" forever: `reportCurrentPosition` bails
+    // while a restore is outstanding, so otherwise reading position / progress /
+    // bookmarks would freeze at the (never-applied) restore point.
+    if (restore.point.locator.spineIndex !== st.spineIndex) {
+      this.store.setRestoreStatus("idle");
+      this.paintAnnotations();
+      return;
+    }
 
     if (content.classList.contains("lumi-image-only")) {
       this.store.setPaginatedMetrics({ pageInChapter: 0 });
       this.applyPageScroll(content, 0);
       this.store.setRestoreStatus("idle");
+      this.paintAnnotations();
       return;
     }
 
@@ -610,6 +649,7 @@ export class PaginatedRenderer {
     await nextFrame();
     if (token !== this.renderToken || content !== this.contentEl) return this.resetInterruptedRestore(restore.token);
     this.store.setRestoreStatus("idle");
+    this.paintAnnotations();
   }
 
   private resetInterruptedRestore(token: number): void {
@@ -761,22 +801,34 @@ export class PaginatedRenderer {
       return;
     }
 
-    if (this.extensions.length === 0) return;
     const content = this.contentEl;
     const section = this.currentSection;
     const book = this.store.getState().book;
     if (!content || !section || !book) return;
 
     const me = e as MouseEvent;
-    const ctx: PointerContext = {
-      ...this.makeRenderContext(book, section, content, content.classList.contains("lumi-image-only"), this.renderToken),
-      clientX: me.clientX,
-      clientY: me.clientY,
-    };
-    for (const ext of this.extensions) {
-      if (ext.onPointerDown?.(ctx, e) === true) return;
+    if (this.extensions.length > 0) {
+      const ctx: PointerContext = {
+        ...this.makeRenderContext(book, section, content, content.classList.contains("lumi-image-only"), this.renderToken),
+        clientX: me.clientX,
+        clientY: me.clientY,
+      };
+      for (const ext of this.extensions) {
+        if (ext.onPointerDown?.(ctx, e) === true) return;
+      }
     }
+    // Core default (runs after extensions): activate a tapped highlight.
+    this.activateHighlightAt(content, me.clientX, me.clientY);
   };
+
+  private activateHighlightAt(content: HTMLElement, clientX: number, clientY: number): void {
+    const st = this.store.getState();
+    if (st.highlights.length === 0) return;
+    const atom = atomAtClientPoint(this.doc, content, clientX, clientY);
+    if (atom === null) return;
+    const hit = st.highlights.find((span) => spanCoversAtom(span, st.spineIndex, atom));
+    if (hit) this.store.activateHighlight(hit.id);
+  }
 
   private handleAnchor(anchor: HTMLAnchorElement, e: Event): void {
     const raw = anchor.getAttribute("href");

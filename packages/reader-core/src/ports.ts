@@ -96,6 +96,8 @@ export type ReaderCallbacks = {
   onProgress?(fraction: number): void;
   onSelection?(): void;
   onHighlightsChange?(highlights: HighlightSpan[]): void;
+  /** A painted highlight/mark was activated (tapped). Carries the host's span id. */
+  onHighlightActivate?(id: string): void;
   onNavigate?(spineIndex: number): void;
   /** A book finished parsing and is now the active book. */
   onBookOpened?(bookId: string): void;

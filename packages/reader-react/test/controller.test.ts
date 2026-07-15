@@ -88,6 +88,7 @@ function baseState(overrides: Partial<ReaderState> = {}): ReaderState {
     pendingFragment: null,
     navigationSeq: 0,
     readingPoint: null,
+    highlights: [],
     restore: { status: "idle", token: 0, point: null },
     paginated: {
       pageInChapter: 0,

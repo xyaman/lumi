@@ -4,7 +4,7 @@
 import { type Book, buildBook, parseEpub } from "@lostcoords/lumi-epub";
 import { buildPosition } from "./positionBuilder";
 import type { ReaderPorts } from "./ports";
-import type { FlowMode, ReaderPosition } from "./types";
+import type { FlowMode, HighlightSpan, ReaderPosition } from "./types";
 
 /** Top-level status of the load lifecycle. */
 export type LoadStatus = "idle" | "loading" | "ready" | "error";
@@ -51,6 +51,8 @@ export type ReaderState = {
   /** Bumps on every navigation; the renderer watches it. */
   navigationSeq: number;
   readingPoint: ReaderPosition | null;
+  /** Host-provided annotations the engine paints (text-range highlights + collapsed page marks). */
+  highlights: HighlightSpan[];
   restore: RestoreState;
   paginated: PaginatedState;
   continuous: ContinuousState;
@@ -82,6 +84,10 @@ export type ReaderStore = {
   clearPendingFragment(): void;
   /** Continuous renderer reporting the section now in view. Updates the flow index WITHOUT bumping `navigationSeq` (that would re-trigger a scroll). */
   setVisibleSpineIndex(index: number): void;
+  /** Host→engine: replace the annotation set the engine paints. Whole-array replace; the host owns identity/diffing. */
+  setHighlights(spans: HighlightSpan[]): void;
+  /** Renderer→host: a painted highlight was activated (tapped). */
+  activateHighlight(id: string): void;
 };
 
 /** Configuration for `createReaderStore`. */
@@ -119,6 +125,7 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
     pendingFragment: null,
     navigationSeq: 0,
     readingPoint: null,
+    highlights: [],
     restore: { status: "idle", token: 0, point: null },
     paginated: emptyPaginated(),
     continuous: emptyContinuous(),
@@ -240,6 +247,7 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
       pendingFragment: null,
       navigationSeq: 0,
       readingPoint: null,
+      highlights: [],
       restore: { status: "idle", token: state.restore.token + 1, point: null },
       paginated: emptyPaginated(),
       continuous: emptyContinuous(),
@@ -368,6 +376,12 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
     },
     setVisibleSpineIndex(index) {
       if (index !== state.spineIndex) setSpineIndex(index);
+    },
+    setHighlights(spans) {
+      set({ highlights: spans });
+    },
+    activateHighlight(id) {
+      cb()?.onHighlightActivate?.(id);
     },
   };
 }

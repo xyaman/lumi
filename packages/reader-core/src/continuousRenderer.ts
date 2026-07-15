@@ -3,6 +3,7 @@
 // jumps, offsets, and progress stay stable.
 
 import { type Book, type Epub, resolveHref, type Section, type SpineItem } from "@lostcoords/lumi-epub";
+import { AnnotationPainter, atomAtClientPoint, type PaintSection, spanCoversAtom } from "./annotations";
 import { type AtomUnit, collectAtomUnits } from "./atomMap";
 import { buildPosition } from "./positionBuilder";
 import type { PointerContext, ReaderExtension, RenderContext, SettingsPort } from "./ports";
@@ -77,8 +78,11 @@ export class ContinuousRenderer {
 
   private scrollEl: HTMLElement | undefined;
   private shadow: ShadowRoot | undefined;
+  // The non-scrolling mount host (positioned): the page-mark overlay anchors here.
+  private mountHost: HTMLElement | undefined;
   private contentShell: HTMLElement | null = null;
   private renderedSections: ContinuousSection[] = [];
+  private readonly painter: AnnotationPainter;
   private readonly blobUrls: string[] = [];
 
   private renderToken = 0;
@@ -93,10 +97,12 @@ export class ContinuousRenderer {
     this.settings = options.settings;
     this.extensions = options.extensions ?? [];
     this.doc = options.doc ?? document;
+    this.painter = new AnnotationPainter(this.doc);
   }
 
   /** Mount into `host`, building the scroll element + shadow root on first call. */
   mount(host: HTMLElement): void {
+    this.mountHost = host;
     if (getComputedStyle(host).position === "static") host.style.position = "relative";
 
     if (!this.scrollEl) {
@@ -119,6 +125,7 @@ export class ContinuousRenderer {
   /** Tear down observers, listeners, blob URLs, and extensions. */
   destroy(): void {
     this.renderToken++;
+    this.painter.destroy();
     if (this.resizeObserver) this.resizeObserver.disconnect();
     if (this.resizeTimer != null) clearTimeout(this.resizeTimer);
     if (this.layoutRaf !== 0) cancelAnimationFrame(this.layoutRaf);
@@ -133,6 +140,7 @@ export class ContinuousRenderer {
     this.blobUrls.length = 0;
     this.contentShell = null;
     this.renderedSections = [];
+    this.mountHost = undefined;
   }
 
   private observeResize(host: HTMLElement): void {
@@ -228,6 +236,7 @@ export class ContinuousRenderer {
     else if (this.store.getState().pendingFragment !== null) this.scrollToCurrentTarget();
     else this.applyInitialScrollPosition(scroll, savedPosition, savedFraction);
     this.notifyScroll();
+    this.paintAnnotations();
   }
 
   private async prepareSection(
@@ -320,6 +329,7 @@ export class ContinuousRenderer {
     const book = st.book;
     if (book) this.notifyRender(book, this.renderedSections, this.renderToken);
     this.notifyScroll();
+    this.paintAnnotations();
   }
 
   /** Force-color toggle: no relayout, just class flips. */
@@ -329,6 +339,27 @@ export class ContinuousRenderer {
       const imageOnly = section.contentEl.classList.contains("lumi-image-only");
       section.contentEl.classList.toggle("lumi-force-colors", force && !imageOnly);
     }
+  }
+
+  /** Repaint host annotations across all mounted sections against the live scroll. */
+  private paintAnnotations(): void {
+    const host = this.mountHost;
+    const book = this.store.getState().book;
+    if (!host || !book || this.renderedSections.length === 0) return;
+    const sections: PaintSection[] = this.renderedSections.map((s) => {
+      const section = book.sections[s.spineIndex];
+      return { spineIndex: s.spineIndex, content: s.contentEl, atomCount: section ? section.endAtom - section.startAtom : 0 };
+    });
+    const { highlights } = this.store.getState();
+    this.painter.paintHighlights(sections, highlights);
+    // The mount host has no shadow (the shadow lives on the inner scroller), so the
+    // overlay renders as a light-DOM child of it and lays out against it.
+    this.painter.paintMarks(host, host, sections, highlights);
+  }
+
+  /** Cheap repaint path used when only the host's highlight set changed. */
+  applyHighlights(): void {
+    this.paintAnnotations();
   }
 
   private applyReaderFontClass(fontId: string): void {
@@ -507,7 +538,12 @@ export class ContinuousRenderer {
     if (restore.status !== "pending" || !restore.point || !scroll) return false;
 
     const section = this.sectionForPosition(restore.point);
-    if (!section) return false;
+    // Cancel rather than leave the restore "pending" (which would freeze position
+    // reporting) if its target section isn't mounted.
+    if (!section) {
+      this.store.setRestoreStatus("idle");
+      return false;
+    }
 
     const token = this.renderToken;
     this.store.setRestoreStatus("applying");
@@ -629,6 +665,7 @@ export class ContinuousRenderer {
       this.syncScrollState();
       this.reportCurrentPosition();
       this.notifyScroll();
+      this.paintAnnotations();
     });
   };
 
@@ -641,7 +678,6 @@ export class ContinuousRenderer {
       return;
     }
 
-    if (this.extensions.length === 0) return;
     const sectionEl = target?.closest<HTMLElement>("[data-lumi-spine-index]");
     const spineIndex = sectionEl ? Number(sectionEl.dataset.lumiSpineIndex) : -1;
     const section = this.renderedSections.find((s) => s.spineIndex === spineIndex);
@@ -649,15 +685,28 @@ export class ContinuousRenderer {
     if (!section || !book) return;
 
     const me = e as MouseEvent;
-    const ctx: PointerContext = {
-      ...this.makeRenderContext(book, section, this.renderToken),
-      clientX: me.clientX,
-      clientY: me.clientY,
-    };
-    for (const ext of this.extensions) {
-      if (ext.onPointerDown?.(ctx, e) === true) return;
+    if (this.extensions.length > 0) {
+      const ctx: PointerContext = {
+        ...this.makeRenderContext(book, section, this.renderToken),
+        clientX: me.clientX,
+        clientY: me.clientY,
+      };
+      for (const ext of this.extensions) {
+        if (ext.onPointerDown?.(ctx, e) === true) return;
+      }
     }
+    // Core default (runs after extensions): activate a tapped highlight.
+    this.activateHighlightAt(section, me.clientX, me.clientY);
   };
+
+  private activateHighlightAt(section: ContinuousSection, clientX: number, clientY: number): void {
+    const st = this.store.getState();
+    if (st.highlights.length === 0) return;
+    const atom = atomAtClientPoint(this.doc, section.contentEl, clientX, clientY);
+    if (atom === null) return;
+    const hit = st.highlights.find((span) => spanCoversAtom(span, section.spineIndex, atom));
+    if (hit) this.store.activateHighlight(hit.id);
+  }
 
   private handleAnchor(anchor: HTMLAnchorElement, e: Event): void {
     const raw = anchor.getAttribute("href");

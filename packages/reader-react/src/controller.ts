@@ -27,6 +27,7 @@ export interface ReaderRenderer {
   applyPage?(): void;
   applyPendingRestore?(): Promise<void | boolean>;
   applyTextColor?(): void;
+  applyHighlights?(): void;
   scheduleLayoutRefresh?(): void;
   scrollToCurrentTarget?(): void;
 }
@@ -77,6 +78,7 @@ type Watched = {
   navigationSeq: number;
   restoreToken: number;
   restoreStatus: ReaderState["restore"]["status"];
+  highlights: ReaderState["highlights"];
 };
 
 function watch(s: ReaderState): Watched {
@@ -88,6 +90,7 @@ function watch(s: ReaderState): Watched {
     navigationSeq: s.navigationSeq,
     restoreToken: s.restore.token,
     restoreStatus: s.restore.status,
+    highlights: s.highlights,
   };
 }
 
@@ -233,6 +236,10 @@ export class ReaderController {
         void active.applyPendingRestore?.();
       }
     }
+
+    // Host annotations changed with no navigation → cheap repaint (a full render / page
+    // turn / restore above already repaints, so a double here is harmless and rare).
+    if (cur.highlights !== prev.highlights) active.applyHighlights?.();
   }
 
   private restoreQueued(cur: Watched, prev: Watched): boolean {
