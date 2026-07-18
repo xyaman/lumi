@@ -2,7 +2,7 @@
 // the renderer reads `store.getState()` and reports geometry via
 // `setPaginatedMetrics()` / `setRestoreStatus()`.
 
-import { type Book, type Epub, resolveHref, type Section, type SpineItem } from "@lostcoords/lumi-epub";
+import { type Book, type Epub, resolveHref, type Section } from "@lostcoords/lumi-epub";
 import { AnnotationPainter, atomAtClientPoint, type PaintSection, spanCoversAtom } from "./annotations";
 import { type AtomUnit, atomToPoint, collectAtomUnits } from "./atomMap";
 import { buildPosition } from "./positionBuilder";
@@ -84,6 +84,7 @@ export class PaginatedRenderer {
   private host: HTMLElement | undefined;
   private shadow: ShadowRoot | undefined;
   private contentEl: HTMLElement | undefined;
+  private currentAtomUnits: AtomUnit[] = [];
   private currentSection: Section | undefined;
   private pageGeometry: PageGeometry = { axis: "y", scrollLeftSign: 1 };
   private readonly painter: AnnotationPainter;
@@ -111,7 +112,8 @@ export class PaginatedRenderer {
   mount(host: HTMLElement): void {
     this.host = host;
     if (!this.shadow) {
-      this.shadow = host.attachShadow({ mode: "open" });
+      this.shadow = host.shadowRoot ?? host.attachShadow({ mode: "open" });
+      this.shadow.replaceChildren();
       this.shadow.addEventListener("click", this.onShadowClick);
       for (const ext of this.extensions) ext.onShadow?.(this.shadow);
     }
@@ -132,7 +134,9 @@ export class PaginatedRenderer {
     for (const u of this.blobUrls) URL.revokeObjectURL(u);
     this.blobUrls.length = 0;
     this.contentEl = undefined;
+    this.currentAtomUnits = [];
     this.currentSection = undefined;
+    this.shadow?.replaceChildren();
     this.host = undefined;
     this.shadow = undefined;
   }
@@ -177,19 +181,15 @@ export class PaginatedRenderer {
     const shadow = this.shadow;
     if (!epub || !host || !shadow) return;
 
-    const spineItem = epub.spine[section.spineIndex];
     const s = this.settings.get();
 
-    // Capture the preserve fraction BEFORE await — store state may change while loading.
-    const paginatedAtStart = this.store.getState().paginated;
-    const fraction =
-      preserveFraction && paginatedAtStart.totalPagesInChapter > 0
-        ? paginatedAtStart.pageInChapter / paginatedAtStart.totalPagesInChapter
-        : null;
+    // Capture the durable atom before awaiting resources. Page fractions drift when
+    // a setting change alters the number of columns/pages.
+    const preservedAtom = preserveFraction ? this.capturePosition()?.locator.atomOffset ?? null : null;
 
     const requestedFontId = s.fontId;
     const [loaded, fontLoaded] = await Promise.all([
-      loadSpineDocument(spineItem, epub),
+      loadSpineDocument(section.href, epub),
       this.settings.loadFont(requestedFontId),
     ]);
     if (myToken !== this.renderToken) return;
@@ -287,7 +287,7 @@ export class PaginatedRenderer {
       this.fixImageOnlySvgs(bodyEl, contentW, contentH);
       // Lift images out of wrapper paragraphs into the grid container; promote a nearest-ancestor id so
       // fragment anchors stay reachable. Skip 1x1 spacers.
-      for (const el of bodyEl.querySelectorAll<HTMLElement>("img, svg")) {
+      for (const el of bodyEl.querySelectorAll<HTMLElement>("img, svg, video, audio")) {
         if (/(?:^|\s)keep-space/.test(el.getAttribute("class") ?? "")) continue;
         if (!el.id) {
           const idAncestor = el.parentElement?.closest("[id]");
@@ -347,6 +347,7 @@ export class PaginatedRenderer {
     }
     this.pageGeometry = { axis, scrollLeftSign: nextScrollLeftSign };
     this.contentEl = content;
+    this.currentAtomUnits = collectAtomUnits(content);
     this.currentSection = section;
 
     const pageSize = Math.max(axis === "x" ? content.clientWidth : content.clientHeight, 1);
@@ -383,8 +384,7 @@ export class PaginatedRenderer {
     // Map element id → page so anchors resolve and the chapter label can refine past `#fragment` nav entries.
     const fragmentPages = new Map<string, number>();
     for (const el of content.querySelectorAll<HTMLElement>("[id]")) {
-      const offset = axis === "x" ? el.offsetLeft : el.offsetTop;
-      const pageOffset = axis === "x" && nextScrollLeftSign < 0 ? Math.abs(offset) : offset;
+      const pageOffset = this.rectPageOffset(content, el.getBoundingClientRect());
       fragmentPages.set(el.id, Math.floor(pageOffset / pageSize));
     }
 
@@ -393,8 +393,11 @@ export class PaginatedRenderer {
     const pageInChapter =
       pendingFragment !== null
         ? (fragmentPages.get(pendingFragment) ?? 0)
-        : fraction !== null
-          ? Math.min(Math.floor(fraction * pageCount), pageCount - 1)
+        : preservedAtom !== null
+          ? Math.min(
+              this.pageForAtomUnits(content, preservedAtom, pageSize, this.currentAtomUnits) ?? 0,
+              pageCount - 1,
+            )
           : st.paginated.pendingPage === "last"
             ? pageCount - 1
             : 0;
@@ -458,8 +461,8 @@ export class PaginatedRenderer {
 
     const nextBlobUrls: string[] = [];
     const [left, right] = await Promise.all([
-      this.buildSvgSpreadPage(epub.spine[leftSection.spineIndex], epub, nextBlobUrls),
-      this.buildSvgSpreadPage(epub.spine[rightSection.spineIndex], epub, nextBlobUrls),
+      this.buildSvgSpreadPage(leftSection.href, epub, nextBlobUrls),
+      this.buildSvgSpreadPage(rightSection.href, epub, nextBlobUrls),
     ]);
     if (myToken !== this.renderToken) {
       for (const u of nextBlobUrls) URL.revokeObjectURL(u);
@@ -498,6 +501,7 @@ export class PaginatedRenderer {
       shadow.replaceChildren(this.el("style", HOST_CSS), this.el("style", SPREAD_CSS), stage);
     }
     this.contentEl = undefined;
+    this.currentAtomUnits = [];
     this.currentSection = rightSection;
     this.pageGeometry = { axis: "y", scrollLeftSign: 1 };
 
@@ -515,11 +519,11 @@ export class PaginatedRenderer {
   }
 
   private async buildSvgSpreadPage(
-    spineItem: SpineItem,
+    href: string,
     epub: Epub,
     nextBlobUrls: string[],
   ): Promise<SvgSpreadPage | null> {
-    const loaded = await loadSpineDocument(spineItem, epub);
+    const loaded = await loadSpineDocument(href, epub);
     if (!loaded) return null;
 
     await rewriteResourceUrls(loaded.doc, epub, loaded.baseDir, nextBlobUrls);
@@ -563,7 +567,7 @@ export class PaginatedRenderer {
     ) {
       this.reportCurrentPosition();
     }
-    this.paintAnnotations();
+    this.paintMarks();
   }
 
   private applyPageScroll(el: HTMLElement, pageIndex: number): void {
@@ -591,7 +595,12 @@ export class PaginatedRenderer {
     const shadow = this.shadow;
     if (!content || !section || !host || !shadow) return;
     const sections: PaintSection[] = [
-      { spineIndex: this.store.getState().spineIndex, content, atomCount: section.endAtom - section.startAtom },
+      {
+        spineIndex: this.store.getState().spineIndex,
+        content,
+        atomCount: section.endAtom - section.startAtom,
+        atomUnits: this.currentAtomUnits,
+      },
     ];
     const { highlights } = this.store.getState();
     this.painter.paintHighlights(sections, highlights);
@@ -599,6 +608,28 @@ export class PaginatedRenderer {
     // light-DOM children would not render); marks lay out against the slot.
     // Paginated is page-aware: the marker sits at the page corner, not the atom's line.
     this.painter.paintMarks(shadow, host, sections, highlights, "page");
+  }
+
+  private paintMarks(): void {
+    const content = this.contentEl;
+    const section = this.currentSection;
+    const host = this.host;
+    const shadow = this.shadow;
+    if (!content || !section || !host || !shadow) return;
+    this.painter.paintMarks(
+      shadow,
+      host,
+      [
+        {
+          spineIndex: this.store.getState().spineIndex,
+          content,
+          atomCount: section.endAtom - section.startAtom,
+          atomUnits: this.currentAtomUnits,
+        },
+      ],
+      this.store.getState().highlights,
+      "page",
+    );
   }
 
   /** Cheap repaint path used when only the host's highlight set changed (no reflow). */
@@ -667,7 +698,7 @@ export class PaginatedRenderer {
       return buildPosition(st.book, st.spineIndex, section.href, 0);
     }
 
-    const units = collectAtomUnits(content);
+    const units = this.currentAtomUnits;
     const pageSize = this.pageSizeFor(content);
     const pageIndex = Math.max(0, Math.round(this.currentPageOffset(content) / pageSize));
     const atom = this.atomAtPageTop(content, units, pageIndex, pageSize);
@@ -692,10 +723,15 @@ export class PaginatedRenderer {
       if (unit.kind === "text" && unit.atomEnd - unit.atomStart > 1) {
         const endPage = this.pageForAtomUnits(content, unit.atomEnd - 1, pageSize, units);
         if (endPage !== null && endPage >= pageIndex) {
-          for (let a = unit.atomStart; a < unit.atomEnd; a++) {
-            const p = this.pageForAtomUnits(content, a, pageSize, units);
-            if (p !== null && p >= pageIndex) return a;
+          let lo = unit.atomStart;
+          let hi = unit.atomEnd - 1;
+          while (lo < hi) {
+            const mid = (lo + hi) >>> 1;
+            const p = this.pageForAtomUnits(content, mid, pageSize, units);
+            if (p === null || p >= pageIndex) hi = mid;
+            else lo = mid + 1;
           }
+          return lo;
         }
       }
       best = unit.atomStart;
@@ -704,7 +740,7 @@ export class PaginatedRenderer {
   }
 
   private pageForAtom(content: HTMLElement, atom: number): number | null {
-    return this.pageForAtomUnits(content, atom, this.pageSizeFor(content), collectAtomUnits(content));
+    return this.pageForAtomUnits(content, atom, this.pageSizeFor(content), this.currentAtomUnits);
   }
 
   private pageForAtomUnits(content: HTMLElement, atom: number, pageSize: number, units: AtomUnit[]): number | null {
@@ -719,10 +755,7 @@ export class PaginatedRenderer {
   }
 
   private rectForAtom(content: HTMLElement, atom: number, units: AtomUnit[]): DOMRect | null {
-    const unit =
-      units.find((u) => atom >= u.atomStart && atom < u.atomEnd) ??
-      units.find((u) => u.atomStart >= atom) ??
-      units.at(-1);
+    const unit = unitForAtomOffset(units, atom);
     if (!unit) return null;
 
     if (unit.kind === "replaced") {
@@ -779,7 +812,6 @@ export class PaginatedRenderer {
     isImageOnly: boolean,
     token: number,
   ): RenderContext {
-    let units: AtomUnit[] | null = null;
     return {
       shadow: this.shadow as ShadowRoot,
       content,
@@ -787,7 +819,7 @@ export class PaginatedRenderer {
       section,
       spineIndex: this.store.getState().spineIndex,
       isImageOnly,
-      atomUnits: () => (units ??= collectAtomUnits(content)),
+      atomUnits: () => this.currentAtomUnits,
       isCurrent: () => token === this.renderToken && content === this.contentEl,
     };
   }
@@ -824,7 +856,7 @@ export class PaginatedRenderer {
   private activateHighlightAt(content: HTMLElement, clientX: number, clientY: number): void {
     const st = this.store.getState();
     if (st.highlights.length === 0) return;
-    const atom = atomAtClientPoint(this.doc, content, clientX, clientY);
+    const atom = atomAtClientPoint(this.doc, content, clientX, clientY, this.currentAtomUnits);
     if (atom === null) return;
     const hit = st.highlights.find((span) => spanCoversAtom(span, st.spineIndex, atom));
     if (hit) this.store.activateHighlight(hit.id);
@@ -880,6 +912,17 @@ function firstUsableRect(range: Range): DOMRect | null {
 
 function usableRect(rect: DOMRect): DOMRect | null {
   return rect.width > 0 || rect.height > 0 ? rect : null;
+}
+
+function unitForAtomOffset(units: AtomUnit[], atom: number): AtomUnit | undefined {
+  let lo = 0;
+  let hi = units.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (units[mid].atomEnd > atom) hi = mid;
+    else lo = mid + 1;
+  }
+  return units[lo] ?? units.at(-1);
 }
 
 function nextFrame(): Promise<void> {

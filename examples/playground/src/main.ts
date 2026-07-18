@@ -54,7 +54,7 @@ function metaBlock(epub: Epub, book: Book, ms: number): HTMLElement {
     ["title", m.title],
     ["creator", m.creator.join(", ") || "—"],
     ["language", m.language],
-    ["direction", m.direction],
+    ["page progression", m.pageProgressionDirection],
     ["layout", m.layout],
     ["spread", m.spread],
     ["epubVersion", m.epubVersion],

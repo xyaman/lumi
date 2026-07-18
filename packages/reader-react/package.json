@@ -1,6 +1,6 @@
 {
   "name": "@lostcoords/lumi-reader-react",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "React 19 wrapper for @lostcoords/lumi-reader-core: mounts the reader engine and bridges the neutral store + SettingsPort to hooks",
   "type": "module",
   "main": "./dist/index.js",
@@ -34,8 +34,8 @@
     "test": "tsx --conditions development --test test/*.test.ts test/*.test.tsx"
   },
   "dependencies": {
-    "@lostcoords/lumi-epub": "workspace:*",
-    "@lostcoords/lumi-reader-core": "workspace:*",
+    "@lostcoords/lumi-epub": "^0.2.0",
+    "@lostcoords/lumi-reader-core": "^0.2.0",
     "use-sync-external-store": "^1.6.0"
   },
   "peerDependencies": {

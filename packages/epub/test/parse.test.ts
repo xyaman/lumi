@@ -3,7 +3,7 @@
 import "./helpers/dom.js";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { EpubParseError, parseEpub } from "../src/index.js";
+import { EpubParseError, openZip, parseEpub } from "../src/index.js";
 import { buildZip, makeEpub, xhtml } from "./helpers/make-epub.js";
 
 const encoder = new TextEncoder();
@@ -20,7 +20,7 @@ describe("parseEpub", () => {
     const epub = await parseEpub(simple());
     assert.equal(epub.meta.title, "テスト");
     assert.equal(epub.meta.language, "ja");
-    assert.equal(epub.meta.direction, "rtl");
+    assert.equal(epub.meta.pageProgressionDirection, "rtl");
     assert.equal(epub.spine.length, 1);
     assert.ok(epub.resources.has("OEBPS/c1.xhtml"));
     // navもNCXも無い最小構成なので目次不在の警告だけが出る。
@@ -48,6 +48,27 @@ describe("parseEpub", () => {
   it("rejects a wrong mimetype", async () => {
     const zip = buildZip([{ name: "mimetype", data: encoder.encode("application/zip") }]);
     await assert.rejects(() => parseEpub(zip), (e: EpubParseError) => e.kind === "wrong-mimetype");
+  });
+
+  it("accepts a valid mimetype entry even when a non-conforming producer did not put it first", async () => {
+    const zip = buildZip([
+      { name: "other", data: encoder.encode("x") },
+      { name: "mimetype", data: encoder.encode("application/epub+zip") },
+    ]);
+    const archive = await openZip(zip);
+    assert.equal(new TextDecoder().decode(await archive.read("other")), "x");
+  });
+
+  it("rejects duplicate ZIP entry names", async () => {
+    const zip = buildZip([
+      { name: "mimetype", data: encoder.encode("application/epub+zip") },
+      { name: "mimetype", data: encoder.encode("application/epub+zip") },
+    ]);
+    await assert.rejects(() => parseEpub(zip), (error: unknown) => {
+      assert.ok(error instanceof EpubParseError);
+      assert.equal(error.kind, "not-zip");
+      return true;
+    });
   });
 
   it("reads the EPUB3 nav document", async () => {
@@ -79,6 +100,19 @@ describe("parseEpub", () => {
     assert.equal(epub.nav[0].href, "OEBPS/c1.xhtml");
   });
 
+  it("falls back to NCX when the declared EPUB3 TOC is empty", async () => {
+    const epub = await parseEpub(
+      makeEpub({
+        files: { "c1.xhtml": xhtml("<p>本文</p>") },
+        manifest: [{ id: "c1", href: "c1.xhtml", mediaType: "application/xhtml+xml" }],
+        spine: [{ idref: "c1" }],
+        nav: "<ol></ol>",
+        ncx: '<navPoint id="n1"><navLabel><text>NCX chapter</text></navLabel><content src="c1.xhtml"/></navPoint>',
+      }),
+    );
+    assert.equal(epub.nav[0]?.label, "NCX chapter");
+  });
+
   it("blocks zip-slip hrefs in the nav document", async () => {
     const epub = await parseEpub(
       makeEpub({
@@ -89,7 +123,7 @@ describe("parseEpub", () => {
       }),
     );
     assert.ok(epub.warnings.some((w) => w.kind === "zip-slip-blocked"));
-    assert.equal(epub.nav[0].href, "");
+    assert.deepEqual(epub.nav, []);
   });
 
   it("defaults rendition:spread and layout when absent", async () => {

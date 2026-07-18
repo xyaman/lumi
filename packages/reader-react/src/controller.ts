@@ -175,7 +175,7 @@ export class ReaderController {
       return;
     }
 
-    const layout = layoutChanged(prev, next);
+    const layout = layoutChanged(prev, next, this.activeFlow ?? "paginated");
     const color = prev.forceTextColor !== next.forceTextColor;
 
     if (this.activeFlow === "paginated") {
@@ -228,7 +228,7 @@ export class ReaderController {
         void active.applyPendingRestore?.(); // restore within the current chapter
       }
     } else {
-      // Continuous: everything is rendered; navigation and restore are seeks.
+      // Continuous navigation and restore are renderer-owned seeks (including window shifts).
       // `spineIndex` alone changes on passive scroll, so only act on `navigationSeq`.
       if (cur.navigationSeq !== prev.navigationSeq) {
         active.scrollToCurrentTarget?.();
@@ -285,14 +285,12 @@ export class ReaderController {
 }
 
 /** Geometry-affecting settings (continuous can refresh these in place). */
-function layoutChanged(a: ReaderSettings, b: ReaderSettings): boolean {
-  return (
+function layoutChanged(a: ReaderSettings, b: ReaderSettings, flow: ReaderState["flow"]): boolean {
+  const shared =
     a.fontSizePx !== b.fontSizePx ||
     a.fontId !== b.fontId ||
     a.lineHeight !== b.lineHeight ||
     a.sideMarginPct !== b.sideMarginPct ||
-    a.blockMarginPct !== b.blockMarginPct ||
-    a.pageColumns !== b.pageColumns ||
-    a.readingDirection !== b.readingDirection
-  );
+    a.blockMarginPct !== b.blockMarginPct;
+  return shared || (flow === "paginated" && (a.pageColumns !== b.pageColumns || a.readingDirection !== b.readingDirection));
 }

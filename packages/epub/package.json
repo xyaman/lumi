@@ -1,6 +1,6 @@
 {
   "name": "@lostcoords/lumi-epub",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Framework-agnostic EPUB parser + atom-offset coordinate model (browser-first, dependency-free)",
   "type": "module",
   "main": "./dist/index.js",

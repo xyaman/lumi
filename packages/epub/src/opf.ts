@@ -68,7 +68,7 @@ export function parseOpf(text: string, opfPath: string, warn: WarningCollector):
 
   const { manifest, navId } = parseManifest(pkg, rootDir, opfPath, warn);
   const { spine, ncxId } = parseSpine(pkg, manifest, opfPath, warn);
-  epubMeta.direction = readDirection(pkg);
+  epubMeta.pageProgressionDirection = readPageProgressionDirection(pkg);
 
   // rendition:layout lives inside <metadata>; reading it here lets every spine item inherit it.
   epubMeta.layout = readLayout(metadata);
@@ -140,7 +140,7 @@ function parseMetadata(metadata: Element, opfPath: string, uniqueIdentifierId: s
     publisher,
     description,
     date,
-    direction: "ltr", // overwritten by readDirection()
+    pageProgressionDirection: "ltr", // overwritten by readPageProgressionDirection()
     layout: "reflowable", // overwritten by readLayout()
     spread: "auto", // overwritten by readSpread()
     epubVersion: "3.0", // overwritten by the caller
@@ -267,7 +267,7 @@ function parseProperties(raw: string | null, known: Set<string>, opfPath: string
   return out;
 }
 
-function readDirection(pkg: Element): "ltr" | "rtl" {
+function readPageProgressionDirection(pkg: Element): "ltr" | "rtl" {
   const dir = findElement(pkg, NS.opf, "spine")?.getAttribute("page-progression-direction");
   return dir === "rtl" ? "rtl" : "ltr";
 }

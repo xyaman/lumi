@@ -26,7 +26,8 @@ export type EpubMetadata = {
   publisher?: string;
   description?: string;
   date?: string;
-  direction: "ltr" | "rtl";
+  /** Physical page progression from the OPF spine. This is independent of text writing mode. */
+  pageProgressionDirection: "ltr" | "rtl";
   layout: "reflowable" | "pre-paginated";
   spread: "auto" | "none" | "landscape" | "portrait" | "both";
   coverHref?: string; // ZIP-absolute path
@@ -71,14 +72,15 @@ export type Direction = "vertical" | "horizontal"; // inline progression
 
 /** A render unit addressed by atom offset. */
 export type Section = {
+  /** Flow index into `Book.sections`. */
   spineIndex: number;
+  /** Index into the original OPF `Epub.spine` array. */
+  epubSpineIndex: number;
   href: string; // ZIP-absolute
   /** Book-global atom offset where this section begins. */
   startAtom: number;
   /** Book-global atom offset one past the last atom (exclusive). */
   endAtom: number;
-  /** Concatenated HTML of the body children (XHTML, serialized). */
-  content: string;
   /** Per-section direction override; null defers to the book default. */
   direction: Direction | null;
   /** Pin to a specific side of a two-page spread; null means auto. */
@@ -100,6 +102,7 @@ export type Section = {
 export type Chapter = {
   label: string;
   /** Resolved position; absent on group headings. */
+  /** `spineIndex` is a flow index into `Book.sections`. */
   target?: { spineIndex: number; offset: number };
   children: Chapter[];
 };
@@ -120,7 +123,7 @@ export type Book = {
   epub: Epub; // original parse output
   sections: Section[];
   chapters: Chapter[]; // resolved TOC tree
-  spineDirection: Direction;
+  pageProgressionDirection: "ltr" | "rtl";
   totalAtoms: number;
   parsedAt: number;
 };
@@ -153,6 +156,8 @@ export type WarningKind =
   | "unusable-nav-hrefs" // nav hrefs don't resolve to manifest items
   | "remote-resource" // item points outside the ZIP
   | "zip-slip-blocked" // href escapes the OPF root
+  | "missing-spine-resource"
+  | "invalid-content-document"
   | "duplicate-manifest-id"
   | "duplicate-spine-idref";
 

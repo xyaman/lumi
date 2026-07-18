@@ -1,5 +1,5 @@
 // Reader-core domain types. Positions and highlights ride @lostcoords/lumi-epub's atom
-// coordinate (one atom per non-whitespace code point, one per replaced element),
+// coordinate (one atom per code point in non-whitespace-only text nodes, one per replaced element),
 // so they are independent of font, viewport, and pagination. Persistence/sync
 // fields are app concerns; the host app extends these shapes via the ports.
 
@@ -27,6 +27,22 @@ export type ReaderPosition = {
   locator: ReaderLocator;
   progress: ReadingProgress;
 };
+
+/** Runtime validation for positions crossing storage or network boundaries. */
+export function isReaderPosition(value: unknown): value is ReaderPosition {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<ReaderPosition>;
+  const locator = candidate.locator as Partial<ReaderLocator> | undefined;
+  return (
+    candidate.version === 1 &&
+    !!locator &&
+    Number.isInteger(locator.spineIndex) &&
+    (locator.spineIndex as number) >= 0 &&
+    typeof locator.spineHref === "string" &&
+    Number.isFinite(locator.atomOffset) &&
+    (locator.atomOffset as number) >= 0
+  );
+}
 
 /** `highlight` is a painted span (start < end). `page` is a one-tap page mark (start === end) — also covers text-less pages like covers/illustrations; not painted. */
 export type HighlightKind = "highlight" | "page";

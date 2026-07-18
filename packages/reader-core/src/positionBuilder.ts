@@ -13,6 +13,7 @@ export function buildPosition(
   spineHref: string,
   atomOffset: number,
 ): ReaderPosition | null {
+  if (!Number.isInteger(spineIndex) || spineIndex < 0 || !Number.isFinite(atomOffset)) return null;
   const section = book.sections[spineIndex];
   if (!section) return null;
 

@@ -1,8 +1,9 @@
 // Convert spine items into Sections (render units addressed by atom offset).
-// Atom rules: 1 atom per non-whitespace code point, 1 per replaced element (img/svg/image/video/audio),
+// Atom rules: 1 atom per code point in non-whitespace-only text nodes, 1 per replaced element (img/svg/image/video/audio),
 // skipping rt/rp/script/style. Any renderer mapping atoms → layout must mirror this walk.
 
 import type { Book, Chapter, Direction, Epub, EpubMetadata, NavPoint, Section } from "./types";
+import { fail } from "./errors";
 import { dirname, resolveHref } from "./utils";
 
 const ELEMENT_NODE = 1;
@@ -48,6 +49,18 @@ function firstChildTag(doc: Document, tag: string): Element | null {
 // Inter-block whitespace is XHTML indentation (collapsed by HTML rendering); skip it so atom counts don't vary with formatting.
 function isWhitespaceOnly(text: string): boolean {
   return !/\S/.test(text);
+}
+
+function codePointLength(text: string): number {
+  let count = 0;
+  for (let i = 0; i < text.length; i++, count++) {
+    const first = text.charCodeAt(i);
+    if (first >= 0xd800 && first <= 0xdbff && i + 1 < text.length) {
+      const second = text.charCodeAt(i + 1);
+      if (second >= 0xdc00 && second <= 0xdfff) i++;
+    }
+  }
+  return count;
 }
 
 /** Detect the section's writing direction from html/body classes (returns null to defer to the book default). */
@@ -126,7 +139,7 @@ function walkAtoms(body: Element, ids: Map<string, number>): number {
       if (child.nodeType === TEXT_NODE || child.nodeType === CDATA_NODE) {
         const text = child.nodeValue ?? "";
         // Count by code point, not UTF-16 unit.
-        if (!isWhitespaceOnly(text)) offset += [...text].length;
+        if (!isWhitespaceOnly(text)) offset += codePointLength(text);
         continue;
       }
       if (child.nodeType !== ELEMENT_NODE) continue;
@@ -179,21 +192,6 @@ function collectCssHrefs(doc: Document, epub: Epub, sectionHref: string): string
   return out;
 }
 
-function escapeXmlText(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-// Serializes the body's children. Browser HTML parsers drop CDATA, but walkAtoms counts its content — emit
-// CDATA contents as ordinary escaped text so char counts agree between parse and render sides.
-function serializeChildren(body: Element): string {
-  const serializer = new XMLSerializer();
-  let out = "";
-  for (let i = 0; i < body.childNodes.length; i++) {
-    out += serializer.serializeToString(body.childNodes[i] as never);
-  }
-  return out.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, (_m, inner: string) => escapeXmlText(inner));
-}
-
 /** Convert every linear spine item into a `Section`, assigning atom offsets in reading order. */
 export async function buildSections(epub: Epub): Promise<Section[]> {
   const sections: Section[] = [];
@@ -207,14 +205,29 @@ export async function buildSections(epub: Epub): Promise<Section[]> {
     if (!href) continue;
 
     const res = epub.resources.get(href);
-    if (!res) continue;
+    if (!res) {
+      epub.warnings.push({
+        kind: "missing-spine-resource",
+        message: `Linear spine resource \`${href}\` is missing from the archive.`,
+        path: href,
+      });
+      continue;
+    }
 
     const html = new TextDecoder().decode(await res.load());
-    const doc = new DOMParser().parseFromString(html, "application/xhtml+xml");
-    if (doc.querySelector("parsererror")) continue;
+    const parser = new DOMParser();
+    let doc = parser.parseFromString(html, "application/xhtml+xml");
+    if (doc.querySelector("parsererror")) doc = parser.parseFromString(html, "text/html");
 
     const body = firstChildTag(doc, "body");
-    if (!body) continue;
+    if (!body) {
+      epub.warnings.push({
+        kind: "invalid-content-document",
+        message: `Spine resource \`${href}\` has no renderable body and was skipped.`,
+        path: href,
+      });
+      continue;
+    }
 
     const ids = new Map<string, number>();
     const count = walkAtoms(body, ids);
@@ -222,11 +235,11 @@ export async function buildSections(epub: Epub): Promise<Section[]> {
     const imgOnly = isImageOnly(body);
 
     sections.push({
-      spineIndex: i,
+      spineIndex: sections.length,
+      epubSpineIndex: i,
       href,
       startAtom: atom,
       endAtom: atom + count,
-      content: serializeChildren(body),
       direction: detectDirection(doc, body),
       forcedSide: detectForcedSide(item.properties),
       layout: resolveLayout(item.properties, epub.meta.layout),
@@ -261,7 +274,7 @@ export function buildChapters(epub: Epub, sections: Section[], nav: NavPoint[]):
   for (const s of sections) {
     byHref.set(s.href, s);
     // Cover the case where the TOC points at the spine item rather than the fallback-resolved content doc.
-    byHref.set(epub.spine[s.spineIndex].href, s);
+    byHref.set(epub.spine[s.epubSpineIndex].href, s);
   }
 
   const convert = (point: NavPoint): Chapter => {
@@ -289,12 +302,15 @@ export function buildChapters(epub: Epub, sections: Section[], nav: NavPoint[]):
 /** Convert an `Epub` into a `Book` with section + chapter structure. */
 export async function buildBook(id: string, epub: Epub): Promise<Book> {
   const sections = await buildSections(epub);
+  if (sections.length === 0) {
+    fail("no-spine-items", "The EPUB has no renderable linear spine documents.");
+  }
   return {
     id,
     epub,
     sections,
     chapters: buildChapters(epub, sections, epub.nav),
-    spineDirection: epub.meta.direction === "rtl" ? "vertical" : "horizontal",
+    pageProgressionDirection: epub.meta.pageProgressionDirection,
     totalAtoms: sections.length > 0 ? sections[sections.length - 1].endAtom : 0,
     parsedAt: Date.now(),
   };

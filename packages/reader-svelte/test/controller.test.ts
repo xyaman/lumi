@@ -37,6 +37,9 @@ function makeRenderer(): FakeRenderer {
     applyTextColor() {
       calls.push("applyTextColor");
     },
+    applyHighlights() {
+      calls.push("applyHighlights");
+    },
     scheduleLayoutRefresh() {
       calls.push("scheduleLayoutRefresh");
     },
@@ -229,6 +232,16 @@ test("restore within the current chapter applies the pending restore", async () 
   assert.equal(renderCount(r), 1, "restore in place did not re-render");
 });
 
+test("annotation changes repaint without rendering", async () => {
+  const { set, created } = harness(baseState({ status: "ready", book }));
+  await flush();
+  const r = created[0].renderer;
+  set({ highlights: [] });
+  await flush();
+  assert.ok(r.calls.includes("applyHighlights"));
+  assert.equal(renderCount(r), 1);
+});
+
 test("applySettings: color-only change repaints without reflow (paginated)", async () => {
   const { controller, created } = harness(baseState({ status: "ready", book }));
   await flush();
@@ -278,4 +291,59 @@ test("applySettings is inert before the first render lands", async () => {
   controller.applySettings(SETTINGS);
   controller.applySettings({ ...SETTINGS, fontSizePx: 30 });
   assert.equal(created.length, 0, "no renderer, no render");
+});
+
+test("applySettings reconciles a change queued during the initial render", async () => {
+  const { store } = makeStore(baseState({ status: "ready", book }));
+  const renderer = makeRenderer();
+  let finishInitial!: () => void;
+  let renders = 0;
+  renderer.render = async (opts) => {
+    renderer.calls.push(opts?.preservePosition ? "render:preserve" : "render");
+    if (++renders === 1) await new Promise<void>((resolve) => (finishInitial = resolve));
+  };
+  const controller = new ReaderController({
+    store,
+    settings: { get: () => SETTINGS } as never,
+    doc: fakeDoc,
+    createRenderer: () => renderer,
+  });
+  controller.mount(fakeHost);
+  controller.applySettings(SETTINGS);
+  controller.applySettings({ ...SETTINGS, fontSizePx: 24 });
+  finishInitial();
+  await flush();
+  assert.ok(renderer.calls.includes("render:preserve"));
+});
+
+test("a replaced renderer cannot mark the current renderer as ready", async () => {
+  const { store, set } = makeStore(baseState({ status: "ready", book }));
+  const created: FakeRenderer[] = [];
+  const finishes: (() => void)[] = [];
+  const createRenderer: CreateRenderer = () => {
+    const renderer = makeRenderer();
+    renderer.render = async (opts) => {
+      renderer.calls.push(opts?.preservePosition ? "render:preserve" : "render");
+      await new Promise<void>((resolve) => finishes.push(resolve));
+    };
+    created.push(renderer);
+    return renderer;
+  };
+  const controller = new ReaderController({
+    store,
+    settings: { get: () => SETTINGS } as never,
+    doc: fakeDoc,
+    createRenderer,
+  });
+  controller.mount(fakeHost);
+  controller.applySettings(SETTINGS);
+  set({ flow: "continuous" });
+  await flush();
+  finishes[0]();
+  await flush();
+  controller.applySettings({ ...SETTINGS, lineHeight: 2 });
+  assert.ok(!created[1].calls.includes("scheduleLayoutRefresh"));
+  finishes[1]();
+  await flush();
+  assert.ok(created[1].calls.includes("scheduleLayoutRefresh"));
 });

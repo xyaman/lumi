@@ -1,7 +1,7 @@
 // Shared render building blocks: load a spine doc into a live DOM, rewrite in-archive
 // references to blob URLs, collect publisher CSS, and provide reader-owned host/user stylesheets.
 
-import { dirname, type Epub, resolveHref, type SpineItem } from "@lostcoords/lumi-epub";
+import { dirname, type Epub, resolveHref } from "@lostcoords/lumi-epub";
 import { loadEpubCss, processCssText } from "./css";
 
 /** Top padding (px) applied around the visible content. */
@@ -45,25 +45,29 @@ export type PublisherCssSource = {
 export type BlobUrlStore = {
   urls: string[];
   byHref: Map<string, string>;
+  pendingByHref: Map<string, Promise<string>>;
 };
 
 /** A sink for collected blob URLs — either a flat array (single render) or a `BlobUrlStore` (continuous). */
 type BlobUrlSink = string[] | BlobUrlStore;
 
 export function createBlobUrlStore(): BlobUrlStore {
-  return { urls: [], byHref: new Map() };
+  return { urls: [], byHref: new Map(), pendingByHref: new Map() };
 }
 
 /** Parse a spine item's bytes into a DOM, falling back to HTML mode on `<parsererror>`. */
-export async function loadSpineDocument(spineItem: SpineItem, epub: Epub): Promise<LoadedSpineDocument | null> {
-  const res = epub.resources.get(spineItem.href);
+export async function loadSpineDocument(href: string, epub: Epub): Promise<LoadedSpineDocument | null> {
+  const res = epub.resources.get(href);
   if (!res) return null;
 
   const bytes = await res.load();
-  const html = textDecoder.decode(bytes);
+  const html = quarantineMarkup(textDecoder.decode(bytes));
   const parser = getDomParser();
   let doc = parser.parseFromString(html, "application/xhtml+xml");
   if (doc.querySelector("parsererror")) doc = parser.parseFromString(html, "text/html");
+  sanitizeDocument(doc);
+  normalizeCdata(doc);
+  restoreNavigationHrefs(doc);
 
   const bodyEl = doc.body as HTMLBodyElement | null;
   if (!bodyEl) return null;
@@ -73,7 +77,7 @@ export async function loadSpineDocument(spineItem: SpineItem, epub: Epub): Promi
     doc,
     htmlEl,
     bodyEl,
-    baseDir: dirname(spineItem.href),
+    baseDir: dirname(href),
     htmlClasses: htmlEl?.getAttribute("class") ?? "",
     bodyClasses: bodyEl.getAttribute("class") ?? "",
     lang: htmlEl?.getAttribute("lang") ?? htmlEl?.getAttribute("xml:lang") ?? epub.meta.language,
@@ -108,29 +112,104 @@ export async function rewriteResourceUrls(
   urls: BlobUrlSink,
 ): Promise<void> {
   const tasks: Promise<void>[] = [];
-  for (const img of doc.querySelectorAll("img")) {
-    tasks.push(
-      (async () => {
-        const raw = img.getAttribute("src");
-        if (!raw) return;
-        const url = await resolveBlobUrl(epub, raw, baseDir, urls);
-        if (url) img.setAttribute("src", url);
-      })(),
-    );
+  for (const el of doc.querySelectorAll("img, audio, video, source, track, input[src], input[data-lumi-src]")) {
+    el.removeAttribute("srcset");
+    el.removeAttribute("data-lumi-srcset");
+    if (el.hasAttribute("src") || el.hasAttribute("data-lumi-src")) {
+      tasks.push(rewriteResourceAttribute(el, "src", epub, baseDir, urls));
+    }
   }
-  for (const im of doc.querySelectorAll("image")) {
+  for (const video of doc.querySelectorAll("video[poster], video[data-lumi-poster]")) {
+    tasks.push(rewriteResourceAttribute(video, "poster", epub, baseDir, urls));
+  }
+  for (const im of doc.querySelectorAll("image, use, feImage")) {
     tasks.push(
       (async () => {
-        const raw = im.getAttribute("href") ?? im.getAttribute("xlink:href");
+        const raw =
+          im.getAttribute("href") ??
+          im.getAttribute("xlink:href") ??
+          im.getAttribute("data-lumi-href") ??
+          im.getAttribute("data-lumi-xlink-href");
         if (!raw) return;
+        im.removeAttribute("data-lumi-href");
+        im.removeAttribute("data-lumi-xlink-href");
+        if (raw.startsWith("#") || raw.startsWith("data:")) {
+          im.setAttribute("href", raw);
+          return;
+        }
         const url = await resolveBlobUrl(epub, raw, baseDir, urls);
-        if (!url) return;
-        im.setAttribute("href", url);
+        if (!url) {
+          im.removeAttribute("href");
+          im.removeAttribute("xlink:href");
+          return;
+        }
+        const hash = raw.indexOf("#");
+        im.setAttribute("href", hash >= 0 ? `${url}${raw.slice(hash)}` : url);
         im.removeAttribute("xlink:href");
       })(),
     );
   }
+  const cssUrlSink = Array.isArray(urls) ? urls : urls.urls;
+  for (const el of doc.querySelectorAll<HTMLElement>("[style]")) {
+    const inline = el.getAttribute("style");
+    if (!inline || !/url\s*\(|@import/i.test(inline)) continue;
+    tasks.push(
+      processCssText(inline, baseDir, epub, new Set(), cssUrlSink).then((safe) => {
+        if (safe) el.setAttribute("style", safe);
+        else el.removeAttribute("style");
+      }),
+    );
+  }
+  for (const style of doc.querySelectorAll("body style")) {
+    tasks.push(
+      processCssText(style.textContent ?? "", baseDir, epub, new Set(), cssUrlSink).then((safe) => {
+        style.textContent = safe;
+      }),
+    );
+  }
   await Promise.all(tasks);
+}
+
+async function rewriteResourceAttribute(
+  el: Element,
+  attribute: string,
+  epub: Epub,
+  baseDir: string,
+  urls: BlobUrlSink,
+): Promise<void> {
+  const quarantined = `data-lumi-${attribute}`;
+  const raw = (el.getAttribute(attribute) ?? el.getAttribute(quarantined))?.trim();
+  el.removeAttribute(quarantined);
+  if (!raw) return;
+  if (raw.startsWith("data:")) {
+    el.setAttribute(attribute, raw);
+    return;
+  }
+  const url = await resolveBlobUrl(epub, raw, baseDir, urls);
+  if (url) el.setAttribute(attribute, url);
+  else el.removeAttribute(attribute);
+}
+
+// DOMParser documents are normally inert, but engines are allowed to begin
+// fetching some subresources while parsing. Quarantine those attributes before
+// parsing; rewriteResourceUrls later restores only data: or in-archive blob URLs.
+function quarantineMarkup(html: string): string {
+  const withoutActiveContainers = html
+    .replace(/<(script|iframe|frameset|object|embed)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(/<(?:script|iframe|frame|frameset|object|embed|base|link)\b[^>]*\/?\s*>/gi, "");
+  return withoutActiveContainers
+    .replace(/\s+xlink:href\s*=/gi, " data-lumi-xlink-href=")
+    .replace(/\s+(srcset|src|poster|href|action|formaction|ping)\s*=/gi, (_match, name: string) => {
+      return ` data-lumi-${name.toLowerCase()}=`;
+    });
+}
+
+function restoreNavigationHrefs(doc: Document): void {
+  for (const anchor of doc.querySelectorAll("a[data-lumi-href]")) {
+    const href = anchor.getAttribute("data-lumi-href");
+    anchor.removeAttribute("data-lumi-href");
+    if (href !== null) anchor.setAttribute("href", href);
+  }
 }
 
 async function resolveBlobUrl(epub: Epub, rawHref: string, baseDir: string, urls: BlobUrlSink): Promise<string | null> {
@@ -138,16 +217,57 @@ async function resolveBlobUrl(epub: Epub, rawHref: string, baseDir: string, urls
   if (!abs) return null;
   const cached = Array.isArray(urls) ? undefined : urls.byHref.get(abs);
   if (cached) return cached;
+  const pending = Array.isArray(urls) ? undefined : urls.pendingByHref.get(abs);
+  if (pending) return pending;
   const r = epub.resources.get(abs);
   if (!r) return null;
-  const data = await r.load();
-  const url = URL.createObjectURL(new Blob([data as BlobPart], { type: r.mediaType }));
-  if (Array.isArray(urls)) urls.push(url);
-  else {
-    urls.byHref.set(abs, url);
-    urls.urls.push(url);
+  const create = r.load().then((data) => URL.createObjectURL(new Blob([data as BlobPart], { type: r.mediaType })));
+  if (!Array.isArray(urls)) urls.pendingByHref.set(abs, create);
+  try {
+    const url = await create;
+    if (Array.isArray(urls)) urls.push(url);
+    else {
+      urls.byHref.set(abs, url);
+      urls.urls.push(url);
+    }
+    return url;
+  } finally {
+    if (!Array.isArray(urls)) urls.pendingByHref.delete(abs);
   }
-  return url;
+}
+
+/** CDATA is legal in XHTML but disappears when nodes enter an HTML document; turn it into ordinary text first. */
+function normalizeCdata(root: Node): void {
+  for (let child = root.firstChild; child; ) {
+    const next = child.nextSibling;
+    if (child.nodeType === 4) {
+      const owner = child.ownerDocument ?? (root as Document);
+      child.parentNode?.replaceChild(owner.createTextNode(child.nodeValue ?? ""), child);
+    }
+    else normalizeCdata(child);
+    child = next;
+  }
+}
+
+/** Remove active/network-capable markup; EPUB content is treated as an untrusted document. */
+function sanitizeDocument(doc: Document): void {
+  for (const el of doc.querySelectorAll("script, iframe, frame, frameset, object, embed, base, link")) el.remove();
+  for (const form of doc.querySelectorAll("form")) {
+    const parent = form.parentNode;
+    if (!parent) continue;
+    while (form.firstChild) parent.insertBefore(form.firstChild, form);
+    parent.removeChild(form);
+  }
+  for (const meta of doc.querySelectorAll("meta[http-equiv]")) {
+    if ((meta.getAttribute("http-equiv") ?? "").toLowerCase() === "refresh") meta.remove();
+  }
+  for (const el of doc.querySelectorAll("*")) {
+    for (const attr of Array.from(el.attributes)) {
+      if (attr.name.toLowerCase().startsWith("on")) el.removeAttribute(attr.name);
+    }
+    el.removeAttribute("formaction");
+    el.removeAttribute("ping");
+  }
 }
 
 async function collectPublisherCss(
@@ -216,12 +336,12 @@ export const HOST_CSS = `
 
 /* Layout guard: publisher .fit rules often use percent max-size, which can become
    indefinite inside the reader and let images exceed the content box. */
-:where(.lumi-content) img, :where(.lumi-content) svg {
+:where(.lumi-content) img, :where(.lumi-content) svg, :where(.lumi-content) video, :where(.lumi-content) audio {
   max-width: var(--lumi-cw, 100%) !important;
   max-height: var(--lumi-ch, 100%) !important;
   object-fit: contain;
 }
-:where(.lumi-content) p:has(img), :where(.lumi-content) p:has(svg) {
+:where(.lumi-content) p:has(img), :where(.lumi-content) p:has(svg), :where(.lumi-content) p:has(video) {
   text-align: center;
 }
 :where(.lumi-content) a { color: inherit; text-decoration: underline; text-decoration-color: var(--reader-link); }
@@ -234,7 +354,7 @@ export const HOST_CSS = `
   min-height: var(--lumi-ch, 100%);
   writing-mode: horizontal-tb;
 }
-:where(.lumi-image-only) img, :where(.lumi-image-only) svg {
+:where(.lumi-image-only) img, :where(.lumi-image-only) svg, :where(.lumi-image-only) video, :where(.lumi-image-only) audio {
   max-width: var(--lumi-cw, 100%) !important;
   max-height: var(--lumi-ch, 100%) !important;
 }

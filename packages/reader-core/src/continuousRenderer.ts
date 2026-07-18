@@ -1,10 +1,10 @@
-// Framework-neutral continuous (scroll) renderer. All sections render into one shadow
-// root under a single content shell, each in a per-spine <section> wrapper so TOC
-// jumps, offsets, and progress stay stable.
+// Framework-neutral continuous (scroll) renderer. A bounded window of spine sections
+// renders into one shadow root; estimated spacers preserve whole-book scroll geometry
+// while keeping DOM, layout, and resource work proportional to the viewport window.
 
-import { type Book, type Epub, resolveHref, type Section, type SpineItem } from "@lostcoords/lumi-epub";
+import { type Book, type Epub, resolveHref, type Section } from "@lostcoords/lumi-epub";
 import { AnnotationPainter, atomAtClientPoint, type PaintSection, spanCoversAtom } from "./annotations";
-import { type AtomUnit, collectAtomUnits } from "./atomMap";
+import { type AtomUnit, atomToPoint, collectAtomUnits } from "./atomMap";
 import { buildPosition } from "./positionBuilder";
 import type { PointerContext, ReaderExtension, RenderContext, SettingsPort } from "./ports";
 import {
@@ -27,6 +27,7 @@ import type { ReaderPosition } from "./types";
 const FONT_READY_TIMEOUT_MS = 500;
 const SECTION_STYLE = "display:block;margin:0;padding:0 0 1.5rem";
 const IMAGE_SECTION_STYLE = `${SECTION_STYLE};min-height:var(--lumi-ch)`;
+const DEFAULT_WINDOW_RADIUS = 3;
 
 /** Geometry + typography inputs the renderer feeds into CSS variables. */
 type LayoutMetrics = {
@@ -53,6 +54,7 @@ type ContinuousSection = {
   contentEl: HTMLElement;
   fragmentRefs: FragmentRef[];
   fitSvgs: FitSvg[];
+  atomUnits: AtomUnit[];
 };
 
 /** Section after parse+rewrite, ready to be appended to the content shell. */
@@ -67,6 +69,8 @@ export type ContinuousRendererOptions = {
   settings: SettingsPort;
   extensions?: ReaderExtension[];
   doc?: Document;
+  /** Number of neighboring spine sections mounted on either side of the visible section. */
+  windowRadius?: number;
 };
 
 /** Scroll-based renderer. */
@@ -75,6 +79,7 @@ export class ContinuousRenderer {
   private readonly settings: SettingsPort;
   private readonly extensions: ReaderExtension[];
   private readonly doc: Document;
+  private readonly windowRadius: number;
 
   private scrollEl: HTMLElement | undefined;
   private shadow: ShadowRoot | undefined;
@@ -91,12 +96,17 @@ export class ContinuousRenderer {
   private resizeObserver: ResizeObserver | undefined;
   private resizeTimer: ReturnType<typeof setTimeout> | undefined;
   private insets = { top: PAD_TOP, bottom: PAD_BOTTOM };
+  private windowStart = 0;
+  private windowEnd = 0;
+  private windowShiftPending = false;
+  private readonly measuredHeights = new Map<string, number>();
 
   constructor(options: ContinuousRendererOptions) {
     this.store = options.store;
     this.settings = options.settings;
     this.extensions = options.extensions ?? [];
     this.doc = options.doc ?? document;
+    this.windowRadius = Math.max(1, Math.floor(options.windowRadius ?? DEFAULT_WINDOW_RADIUS));
     this.painter = new AnnotationPainter(this.doc);
   }
 
@@ -140,6 +150,12 @@ export class ContinuousRenderer {
     this.blobUrls.length = 0;
     this.contentShell = null;
     this.renderedSections = [];
+    this.windowStart = this.windowEnd = 0;
+    this.windowShiftPending = false;
+    this.measuredHeights.clear();
+    this.scrollEl?.remove();
+    this.scrollEl = undefined;
+    this.shadow = undefined;
     this.mountHost = undefined;
   }
 
@@ -163,7 +179,7 @@ export class ContinuousRenderer {
     this.resizeObserver.observe(host);
   }
 
-  // Rebuild the whole scroll body when the book/source or the publisher-CSS toggle changes; geometry/font/color updates use the cheaper `refreshLayout` path.
+  // Rebuild the mounted spine window when the source/window or publisher-CSS toggle changes; geometry/font/color updates use the cheaper `refreshLayout` path.
   async render(): Promise<void> {
     const myToken = ++this.renderToken;
     const st = this.store.getState();
@@ -175,7 +191,9 @@ export class ContinuousRenderer {
     const s = this.settings.get();
 
     const preserveFraction = shadow.childElementCount > 0;
-    const savedPosition = preserveFraction && st.restore.status === "idle" ? this.capturePosition() : null;
+    const currentSectionIsMounted = this.renderedSections.some((section) => section.spineIndex === st.spineIndex);
+    const savedPosition =
+      preserveFraction && currentSectionIsMounted && st.restore.status === "idle" ? this.capturePosition() : null;
     const cont = this.store.getState().continuous;
     const savedFraction =
       preserveFraction && !savedPosition && cont.scrollRange > 0 ? cont.scrollTop / cont.scrollRange : null;
@@ -183,8 +201,15 @@ export class ContinuousRenderer {
     const blobStore = createBlobUrlStore();
     const content = this.doc.createElement("div");
 
+    const center = Math.max(0, Math.min(st.spineIndex, book.sections.length - 1));
+    const windowStart = Math.max(0, center - this.windowRadius);
+    const windowEnd = Math.min(book.sections.length, center + this.windowRadius + 1);
     const prepared = (
-      await Promise.all(book.sections.map((section, i) => this.prepareSection(section, i, epub, blobStore)))
+      await Promise.all(
+        book.sections.slice(windowStart, windowEnd).map((section, offset) =>
+          this.prepareSection(section, windowStart + offset, epub, blobStore),
+        ),
+      )
     ).filter((p): p is PreparedSection => p !== null);
     if (myToken !== this.renderToken) return this.revokeAll(blobStore.urls);
 
@@ -204,7 +229,9 @@ export class ContinuousRenderer {
     const metrics = this.getLayoutMetrics(scroll, activeFontId);
     this.applyContentShellLayout(content, metrics);
     for (const section of committed) fitSectionSvgs(section, metrics);
-    content.append(...committed.map((section) => section.sectionEl));
+    const topSpacer = this.spacer(this.estimatedRangeHeight(book, 0, windowStart, metrics), "before");
+    const bottomSpacer = this.spacer(this.estimatedRangeHeight(book, windowEnd, book.sections.length, metrics), "after");
+    content.append(topSpacer, ...committed.map((section) => section.sectionEl), bottomSpacer);
 
     const shadowChildren: Node[] = [];
     let fallbackUserStyleEl: HTMLStyleElement | null = null;
@@ -222,10 +249,14 @@ export class ContinuousRenderer {
     this.blobUrls.push(...blobStore.urls);
     this.contentShell = content;
     this.renderedSections = committed;
+    this.windowStart = windowStart;
+    this.windowEnd = windowEnd;
     this.applyReaderFontClass(activeFontId);
     this.applyTextColor();
 
     shadow.replaceChildren(...shadowChildren, content);
+    await nextFrame();
+    if (myToken !== this.renderToken) return;
     this.refreshOffsets(scroll);
     this.notifyRender(book, committed, myToken);
 
@@ -245,8 +276,7 @@ export class ContinuousRenderer {
     epub: Epub,
     blobStore: ReturnType<typeof createBlobUrlStore>,
   ): Promise<PreparedSection | null> {
-    const spineItem: SpineItem = epub.spine[section.spineIndex];
-    const loaded = await loadSpineDocument(spineItem, epub);
+    const loaded = await loadSpineDocument(section.href, epub);
     if (!loaded) return null;
 
     const { doc, htmlEl, bodyEl, baseDir, htmlClasses, bodyClasses, lang } = loaded;
@@ -274,7 +304,7 @@ export class ContinuousRenderer {
 
     const fitSvgs = collectFitSvgs(bodyEl);
     if (imageOnly) {
-      for (const el of bodyEl.querySelectorAll<HTMLElement>("img, svg")) {
+      for (const el of bodyEl.querySelectorAll<HTMLElement>("img, svg, video, audio")) {
         if (/(?:^|\s)keep-space/.test(el.getAttribute("class") ?? "")) continue;
         if (!el.id) {
           const idAncestor = el.parentElement?.closest("[id]");
@@ -291,7 +321,15 @@ export class ContinuousRenderer {
     sectionEl.appendChild(contentEl);
 
     return {
-      section: { spineIndex, href: section.href, sectionEl, contentEl, fragmentRefs, fitSvgs },
+      section: {
+        spineIndex,
+        href: section.href,
+        sectionEl,
+        contentEl,
+        fragmentRefs,
+        fitSvgs,
+        atomUnits: collectAtomUnits(contentEl),
+      },
       publisherCssSource: { htmlEl, baseDir, isImageOnly: imageOnly, cssHrefs: section.cssHrefs },
     };
   }
@@ -301,24 +339,33 @@ export class ContinuousRenderer {
     if (this.layoutRaf !== 0) cancelAnimationFrame(this.layoutRaf);
     this.layoutRaf = requestAnimationFrame(() => {
       this.layoutRaf = 0;
-      this.refreshLayout();
+      void this.refreshLayout();
     });
   }
 
   // Keep the existing DOM; refresh inherited geometry vars and refit SVGs. Use for font/line-height/margin changes.
-  refreshLayout(): void {
+  async refreshLayout(): Promise<void> {
     const scroll = this.scrollEl;
     if (!scroll || !this.contentShell) return;
     const st = this.store.getState();
+    const token = this.renderToken;
 
     const savedPosition = st.restore.status === "idle" ? this.capturePosition() : null;
     const cont = st.continuous;
     const savedFraction = !savedPosition && cont.scrollRange > 0 ? cont.scrollTop / cont.scrollRange : null;
 
-    const metrics = this.getLayoutMetrics(scroll, this.settings.get().fontId);
+    const requestedFontId = this.settings.get().fontId;
+    const activeFontId = await this.prepareFont(requestedFontId, token);
+    if (token !== this.renderToken || scroll !== this.scrollEl || !this.contentShell) return;
+    this.updateInsets(this.mountHost as HTMLElement);
+    this.applyScrollerStyle();
+    this.measuredHeights.clear();
+    const metrics = this.getLayoutMetrics(scroll, activeFontId);
     this.applyContentShellLayout(this.contentShell, metrics);
-    this.applyReaderFontClass(this.settings.get().fontId);
+    this.applyReaderFontClass(activeFontId);
     for (const section of this.renderedSections) fitSectionSvgs(section, metrics);
+    await nextFrame();
+    if (token !== this.renderToken || scroll !== this.scrollEl) return;
     this.refreshOffsets(scroll);
 
     if (savedPosition) this.applyPositionToScroll(savedPosition);
@@ -348,13 +395,34 @@ export class ContinuousRenderer {
     if (!host || !book || this.renderedSections.length === 0) return;
     const sections: PaintSection[] = this.renderedSections.map((s) => {
       const section = book.sections[s.spineIndex];
-      return { spineIndex: s.spineIndex, content: s.contentEl, atomCount: section ? section.endAtom - section.startAtom : 0 };
+      return {
+        spineIndex: s.spineIndex,
+        content: s.contentEl,
+        atomCount: section ? section.endAtom - section.startAtom : 0,
+        atomUnits: s.atomUnits,
+      };
     });
     const { highlights } = this.store.getState();
     this.painter.paintHighlights(sections, highlights);
     // The mount host has no shadow (the shadow lives on the inner scroller), so the
     // overlay renders as a light-DOM child of it and lays out against it.
     this.painter.paintMarks(host, host, sections, highlights);
+  }
+
+  private paintMarks(): void {
+    const host = this.mountHost;
+    const book = this.store.getState().book;
+    if (!host || !book || this.renderedSections.length === 0) return;
+    const sections: PaintSection[] = this.renderedSections.map((s) => {
+      const section = book.sections[s.spineIndex];
+      return {
+        spineIndex: s.spineIndex,
+        content: s.contentEl,
+        atomCount: section ? section.endAtom - section.startAtom : 0,
+        atomUnits: s.atomUnits,
+      };
+    });
+    this.painter.paintMarks(host, host, sections, this.store.getState().highlights);
   }
 
   /** Cheap repaint path used when only the host's highlight set changed. */
@@ -403,17 +471,24 @@ export class ContinuousRenderer {
   }
 
   private refreshOffsets(scroll: HTMLElement): void {
+    const book = this.store.getState().book;
+    if (!book) return;
     const spineOffsets: number[] = [];
-    const fragmentOffsets: Map<string, number>[] = [];
+    const fragmentOffsets: Map<string, number>[] = book.sections.map(() => new Map());
+    const metrics = this.getLayoutMetrics(scroll, this.settings.get().fontId);
     for (const section of this.renderedSections) {
-      const sectionTop = section.sectionEl.offsetTop;
-      spineOffsets[section.spineIndex] = sectionTop;
-      const offsets = new Map<string, number>();
-      for (const fragment of section.fragmentRefs) {
-        offsets.set(fragment.id, sectionTop + offsetTopWithinContent(fragment.el, section.contentEl));
-      }
-      fragmentOffsets[section.spineIndex] = offsets;
+      const measured = section.sectionEl.offsetHeight;
+      if (measured > 0) this.measuredHeights.set(section.href, measured);
     }
+    let top = 0;
+    for (let i = 0; i < book.sections.length; i++) {
+      spineOffsets[i] = top;
+      top += this.estimatedSectionHeight(book.sections[i], metrics);
+    }
+    const topSpacer = this.contentShell?.querySelector<HTMLElement>('[data-lumi-spacer="before"]');
+    const bottomSpacer = this.contentShell?.querySelector<HTMLElement>('[data-lumi-spacer="after"]');
+    if (topSpacer) topSpacer.style.height = `${spineOffsets[this.windowStart] ?? 0}px`;
+    if (bottomSpacer) bottomSpacer.style.height = `${Math.max(top - (spineOffsets[this.windowEnd] ?? top), 0)}px`;
     this.store.setContinuousMetrics({
       spineOffsets,
       fragmentOffsets,
@@ -436,24 +511,26 @@ export class ContinuousRenderer {
     if (this.renderedSections.length === 0 || spineOffsets.length === 0) return;
 
     const marker = scrollTop + Math.min(scroll.clientHeight * 0.25, 160);
-    let visibleSpine = 0;
-    for (let i = 0; i < spineOffsets.length; i++) {
-      if ((spineOffsets[i] ?? Number.POSITIVE_INFINITY) <= marker) visibleSpine = i;
-      else break;
-    }
+    const visibleSpine = indexForOffset(spineOffsets, marker);
     this.store.setVisibleSpineIndex(visibleSpine);
   }
 
   /** Scroll to the queued navigation target, including its pending fragment. */
-  scrollToCurrentTarget(): void {
+  async scrollToCurrentTarget(): Promise<void> {
     const scroll = this.scrollEl;
     if (!scroll) return;
     const st = this.store.getState();
+    if (!this.renderedSections.some((section) => section.spineIndex === st.spineIndex)) {
+      await this.render();
+      return;
+    }
     const spineOffsets = st.continuous.spineOffsets;
     const spineIndex = Math.max(Math.min(st.spineIndex, spineOffsets.length - 1), 0);
     let target = spineOffsets[spineIndex] ?? 0;
     if (st.pendingFragment !== null) {
-      target = st.continuous.fragmentOffsets[spineIndex]?.get(st.pendingFragment) ?? target;
+      const section = this.renderedSections.find((candidate) => candidate.spineIndex === spineIndex);
+      const fragment = section?.fragmentRefs.find((candidate) => candidate.id === st.pendingFragment);
+      if (section && fragment) target += offsetTopWithinContent(fragment.el, section.contentEl);
     }
     scroll.scrollTo({ top: target, behavior: "auto" });
     this.store.clearPendingFragment();
@@ -497,17 +574,29 @@ export class ContinuousRenderer {
       return buildPosition(st.book, section.spineIndex, section.href, 0);
     }
 
-    const units = collectAtomUnits(section.contentEl);
+    const units = section.atomUnits;
     if (units.length === 0) return null;
-    const sectionTop = st.continuous.spineOffsets[section.spineIndex] ?? section.sectionEl.offsetTop;
-    const targetTop = scroll.scrollTop;
-
-    let bestAtom = units[0].atomStart;
-    for (const unit of units) {
-      const top = this.atomUnitTop(unit, section);
-      if (top === null) continue;
+    const targetY = scroll.getBoundingClientRect().top + 1;
+    let lo = 0;
+    let hi = units.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      const rect = this.rectForUnit(units[mid]);
+      if (!rect || rect.bottom > targetY) hi = mid;
+      else lo = mid + 1;
+    }
+    let bestAtom = units[Math.min(lo, units.length - 1)].atomStart;
+    // Hidden publisher content can have no rect. Walk forward from the binary-search
+    // boundary until a visible unit is found; normal prose resolves on the first pass.
+    for (let i = lo; i < units.length; i++) {
+      const unit = units[i];
+      const rect = this.rectForUnit(unit);
+      if (!rect) continue;
+      if (rect.bottom > targetY) {
+        bestAtom = unit.kind === "text" ? this.firstAtomOnVisibleLine(section, unit, targetY) : unit.atomStart;
+        break;
+      }
       bestAtom = unit.atomStart;
-      if (sectionTop + top >= targetTop - 1) break;
     }
     return buildPosition(st.book, section.spineIndex, section.href, bestAtom);
   }
@@ -515,6 +604,7 @@ export class ContinuousRenderer {
   private reportCurrentPosition(): void {
     const st = this.store.getState();
     if (st.status !== "ready" || st.restore.status !== "idle") return;
+    if (!this.renderedSections.some((section) => section.spineIndex === st.spineIndex)) return;
     const position = this.capturePosition();
     if (position) this.store.reportPosition(position);
   }
@@ -582,16 +672,13 @@ export class ContinuousRenderer {
   }
 
   private scrollTargetForPosition(position: ReaderPosition, section: ContinuousSection): number | null {
-    const spineOffsets = this.store.getState().continuous.spineOffsets;
-    const sectionTop = spineOffsets[section.spineIndex] ?? section.sectionEl.offsetTop;
     if (section.contentEl.classList.contains("lumi-image-only") && position.locator.atomOffset === 0) {
-      return sectionTop;
+      return this.store.getState().continuous.spineOffsets[section.spineIndex] ?? section.sectionEl.offsetTop;
     }
-    const units = collectAtomUnits(section.contentEl);
-    const unit = unitForAtomOffset(units, position.locator.atomOffset);
-    if (!unit) return null;
-    const unitTop = this.atomUnitTop(unit, section);
-    return unitTop === null ? null : sectionTop + unitTop;
+    const scroll = this.scrollEl;
+    const rect = this.rectForAtom(section, position.locator.atomOffset);
+    if (!scroll || !rect) return null;
+    return scroll.scrollTop + rect.top - scroll.getBoundingClientRect().top;
   }
 
   private applyPositionToScroll(position: ReaderPosition): boolean {
@@ -612,10 +699,57 @@ export class ContinuousRenderer {
     );
   }
 
-  private atomUnitTop(unit: AtomUnit, section: ContinuousSection): number | null {
-    const el = unit.kind === "replaced" ? unit.node : unit.node.parentElement;
-    if (!el) return null;
-    return offsetTopWithinContent(el, section.contentEl);
+  private rectForUnit(unit: AtomUnit): DOMRect | null {
+    if (unit.kind === "replaced") return usableRect(unit.node.getBoundingClientRect());
+    const range = this.doc.createRange();
+    range.selectNodeContents(unit.node);
+    const rect = usableRect(range.getBoundingClientRect()) ?? firstUsableRect(range);
+    range.detach();
+    return rect;
+  }
+
+  private rectForAtom(section: ContinuousSection, atom: number): DOMRect | null {
+    const units = section.atomUnits;
+    const unit = unitForAtomOffset(units, atom);
+    if (!unit) return null;
+    if (unit.kind === "replaced") return usableRect(unit.node.getBoundingClientRect());
+    const start = atomToPoint(section.contentEl, Math.max(unit.atomStart, Math.min(atom, unit.atomEnd - 1)), units);
+    const end = atomToPoint(section.contentEl, Math.max(unit.atomStart, Math.min(atom + 1, unit.atomEnd)), units);
+    if (!start || !end) return null;
+    const range = this.doc.createRange();
+    try {
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+      return firstUsableRect(range);
+    } catch {
+      return null;
+    } finally {
+      range.detach();
+    }
+  }
+
+  private firstAtomOnVisibleLine(section: ContinuousSection, unit: Extract<AtomUnit, { kind: "text" }>, y: number): number {
+    let lo = unit.atomStart;
+    let hi = Math.max(unit.atomStart, unit.atomEnd - 1);
+    // Find any glyph on the first line whose bottom crosses the viewport top.
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      const rect = this.rectForAtom(section, mid);
+      if (!rect || rect.bottom > y) hi = mid;
+      else lo = mid + 1;
+    }
+    const visible = this.rectForAtom(section, lo);
+    if (!visible) return lo;
+    const lineTop = visible.top;
+    let first = unit.atomStart;
+    let end = lo;
+    while (first < end) {
+      const mid = (first + end) >>> 1;
+      const rect = this.rectForAtom(section, mid);
+      if (!rect || rect.top >= lineTop - 0.5) end = mid;
+      else first = mid + 1;
+    }
+    return first;
   }
 
   private resetInterruptedRestore(token: number): void {
@@ -644,7 +778,6 @@ export class ContinuousRenderer {
   }
 
   private makeRenderContext(book: Book, s: ContinuousSection, token: number): RenderContext {
-    let units: AtomUnit[] | null = null;
     const content = s.contentEl;
     return {
       shadow: this.shadow as ShadowRoot,
@@ -653,7 +786,7 @@ export class ContinuousRenderer {
       section: book.sections[s.spineIndex],
       spineIndex: s.spineIndex,
       isImageOnly: content.classList.contains("lumi-image-only"),
-      atomUnits: () => (units ??= collectAtomUnits(content)),
+      atomUnits: () => s.atomUnits,
       isCurrent: () => token === this.renderToken && this.renderedSections.includes(s),
     };
   }
@@ -665,7 +798,8 @@ export class ContinuousRenderer {
       this.syncScrollState();
       this.reportCurrentPosition();
       this.notifyScroll();
-      this.paintAnnotations();
+      this.paintMarks();
+      this.maybeShiftWindow();
     });
   };
 
@@ -702,7 +836,7 @@ export class ContinuousRenderer {
   private activateHighlightAt(section: ContinuousSection, clientX: number, clientY: number): void {
     const st = this.store.getState();
     if (st.highlights.length === 0) return;
-    const atom = atomAtClientPoint(this.doc, section.contentEl, clientX, clientY);
+    const atom = atomAtClientPoint(this.doc, section.contentEl, clientX, clientY, section.atomUnits);
     if (atom === null) return;
     const hit = st.highlights.find((span) => spanCoversAtom(span, section.spineIndex, atom));
     if (hit) this.store.activateHighlight(hit.id);
@@ -755,6 +889,43 @@ export class ContinuousRenderer {
     return node;
   }
 
+  private spacer(height: number, side: "before" | "after"): HTMLElement {
+    const spacer = this.doc.createElement("div");
+    spacer.dataset.lumiSpacer = side;
+    spacer.setAttribute("aria-hidden", "true");
+    spacer.style.cssText = `display:block;height:${Math.max(height, 0)}px;pointer-events:none`;
+    return spacer;
+  }
+
+  private estimatedRangeHeight(book: Book, start: number, end: number, metrics: LayoutMetrics): number {
+    let height = 0;
+    for (let i = start; i < end; i++) height += this.estimatedSectionHeight(book.sections[i], metrics);
+    return height;
+  }
+
+  private estimatedSectionHeight(section: Section, metrics: LayoutMetrics): number {
+    const measured = this.measuredHeights.get(section.href);
+    if (measured !== undefined) return measured;
+    if (section.isImageOnly) return metrics.contentH + 24;
+    const atoms = Math.max(section.endAtom - section.startAtom, 1);
+    const averageGlyphWidth = Math.max(metrics.fontSizePx * 0.72, 1);
+    const charsPerLine = Math.max(Math.floor(metrics.contentW / averageGlyphWidth), 1);
+    const lines = Math.ceil(atoms / charsPerLine);
+    return Math.max(lines * metrics.fontSizePx * metrics.lineHeight + 24, 96);
+  }
+
+  private maybeShiftWindow(): void {
+    if (this.windowShiftPending || this.renderedSections.length === 0) return;
+    const index = this.store.getState().spineIndex;
+    const nearStart = this.windowStart > 0 && index <= this.windowStart + 1;
+    const nearEnd = this.windowEnd < (this.store.getState().book?.sections.length ?? 0) && index >= this.windowEnd - 2;
+    if (!nearStart && !nearEnd) return;
+    this.windowShiftPending = true;
+    void this.render().finally(() => {
+      this.windowShiftPending = false;
+    });
+  }
+
   private revokeAll(urls: string[]): void {
     for (const u of urls) URL.revokeObjectURL(u);
   }
@@ -793,12 +964,38 @@ function offsetTopWithinContent(el: Element, contentEl: HTMLElement): number {
 }
 
 function unitForAtomOffset(units: AtomUnit[], atomOffset: number): AtomUnit | null {
-  return (
-    units.find((u) => atomOffset >= u.atomStart && atomOffset < u.atomEnd) ??
-    units.find((u) => u.atomStart >= atomOffset) ??
-    units.at(-1) ??
-    null
-  );
+  if (units.length === 0) return null;
+  let lo = 0;
+  let hi = units.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (units[mid].atomEnd > atomOffset) hi = mid;
+    else lo = mid + 1;
+  }
+  return units[lo] ?? units.at(-1) ?? null;
+}
+
+function indexForOffset(offsets: number[], target: number): number {
+  if (offsets.length === 0) return 0;
+  let lo = 0;
+  let hi = offsets.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if ((offsets[mid] ?? Number.POSITIVE_INFINITY) <= target) lo = mid + 1;
+    else hi = mid;
+  }
+  return Math.max(0, lo - 1);
+}
+
+function firstUsableRect(range: Range): DOMRect | null {
+  for (const rect of range.getClientRects()) {
+    if (rect.width > 0 || rect.height > 0) return rect;
+  }
+  return usableRect(range.getBoundingClientRect());
+}
+
+function usableRect(rect: DOMRect): DOMRect | null {
+  return rect.width > 0 || rect.height > 0 ? rect : null;
 }
 
 function nextFrame(): Promise<void> {

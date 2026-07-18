@@ -37,6 +37,9 @@ function makeRenderer(): FakeRenderer {
     applyTextColor() {
       calls.push("applyTextColor");
     },
+    applyHighlights() {
+      calls.push("applyHighlights");
+    },
     scheduleLayoutRefresh() {
       calls.push("scheduleLayoutRefresh");
     },
@@ -228,6 +231,16 @@ test("restore within the current chapter applies the pending restore", async () 
   await flush();
   assert.ok(r.calls.includes("applyPendingRestore"), "applied the queued restore");
   assert.equal(renderCount(r), 1, "restore in place did not re-render");
+});
+
+test("annotation changes repaint without rendering", async () => {
+  const { set, created } = harness(baseState({ status: "ready", book }));
+  await flush();
+  const r = created[0].renderer;
+  set({ highlights: [] });
+  await flush();
+  assert.ok(r.calls.includes("applyHighlights"));
+  assert.equal(renderCount(r), 1);
 });
 
 test("applySettings: color-only change repaints without reflow (paginated)", async () => {

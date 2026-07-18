@@ -69,3 +69,4 @@ export type {
   ReadingProgress,
   TokenChip,
 } from "./types";
+export { isReaderPosition } from "./types";

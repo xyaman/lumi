@@ -4,7 +4,7 @@
 
 import type { Book, Section } from "@lostcoords/lumi-epub";
 import type { AtomUnit } from "./atomMap";
-import type { HighlightSpan, ReaderPosition, TokenChip } from "./types";
+import type { ReaderPosition, TokenChip } from "./types";
 
 /** Persistence. The app backs this with IndexedDB (and its own cloud sync); the engine parses the raw bytes itself. */
 export type StoragePort = {
@@ -94,11 +94,8 @@ export type ReaderExtension = {
 export type ReaderCallbacks = {
   onPositionChange?(position: ReaderPosition): void;
   onProgress?(fraction: number): void;
-  onSelection?(): void;
-  onHighlightsChange?(highlights: HighlightSpan[]): void;
   /** A painted highlight/mark was activated (tapped). Carries the host's span id. */
   onHighlightActivate?(id: string): void;
-  onNavigate?(spineIndex: number): void;
   /** A book finished parsing and is now the active book. */
   onBookOpened?(bookId: string): void;
   /** The previously-active book was left (switching books). The host flushes pending sync and clears per-book caches here. */

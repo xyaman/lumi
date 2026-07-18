@@ -63,6 +63,14 @@ describe("createReaderStore — load", () => {
     assert.match(store.getState().error ?? "", /not found/);
   });
 
+  it("ignores a malformed persisted position instead of failing the book load", async () => {
+    const storage = memoryStorage(threeSectionEpub(), { locator: null } as never);
+    const store = createReaderStore({ ports: { storage } });
+    await store.loadBook("book-1");
+    assert.equal(store.getState().status, "ready");
+    assert.equal(store.getState().restore.status, "idle");
+  });
+
   it("fires onBookOpened and onBookClosed", async () => {
     const opened: string[] = [];
     const closed: string[] = [];
@@ -76,6 +84,79 @@ describe("createReaderStore — load", () => {
     await store.loadBook("b");
     assert.deepEqual(opened, ["a", "b"]);
     assert.deepEqual(closed, ["a"]);
+  });
+
+  it("deduplicates concurrent requests for the same book", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let loads = 0;
+    const storage: StoragePort = {
+      loadBookFile: async () => {
+        loads++;
+        await gate;
+        return threeSectionEpub();
+      },
+      getPosition: async () => null,
+      setPosition: () => {},
+    };
+    const store = createReaderStore({ ports: { storage } });
+    const first = store.loadBook("same");
+    const second = store.loadBook("same");
+    assert.strictEqual(first, second);
+    release();
+    await first;
+    assert.equal(loads, 1);
+    assert.equal(store.getState().status, "ready");
+  });
+
+  it("does not let a superseded load overwrite the newer book", async () => {
+    let releaseFirst!: (blob: Blob) => void;
+    const firstBlob = new Promise<Blob>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const opened: string[] = [];
+    const storage: StoragePort = {
+      loadBookFile: async (id) => (id === "first" ? firstBlob : threeSectionEpub()),
+      getPosition: async () => null,
+      setPosition: () => {},
+    };
+    const store = createReaderStore({
+      ports: { storage, callbacks: { onBookOpened: (id) => opened.push(id) } },
+    });
+    const first = store.loadBook("first");
+    await Promise.resolve();
+    const second = store.loadBook("second");
+    await second;
+    releaseFirst(threeSectionEpub());
+    await first;
+    assert.equal(store.getState().bookId, "second");
+    assert.deepEqual(opened, ["second"]);
+  });
+
+  it("keeps host callback failures outside the reader state machine", async () => {
+    const store = createReaderStore({
+      ports: {
+        storage: memoryStorage(threeSectionEpub()),
+        callbacks: {
+          onBookOpened: () => {
+            throw new Error("host failure");
+          },
+          onPositionChange: () => {
+            throw new Error("host failure");
+          },
+        },
+      },
+    });
+    await store.loadBook("book-1");
+    assert.equal(store.getState().status, "ready");
+    store.reportPosition({
+      version: 1,
+      locator: { spineIndex: 0, spineHref: "OEBPS/c1.xhtml", atomOffset: 1 },
+      progress: { globalAtomOffset: 1, totalAtoms: 15, fraction: 1 / 15 },
+    });
+    assert.equal(store.getState().readingPoint?.locator.atomOffset, 1);
   });
 });
 
@@ -117,6 +198,20 @@ describe("createReaderStore — navigation", () => {
     const before = store.getState().navigationSeq;
     store.nextChapter();
     assert.ok(store.getState().navigationSeq > before);
+  });
+
+  it("cancels a pending restore when the user navigates", async () => {
+    const store = await loadedStore();
+    const href = store.getState().book!.sections[0].href;
+    store.jumpToPosition({
+      version: 1,
+      locator: { spineIndex: 0, spineHref: href, atomOffset: 2 },
+      progress: { globalAtomOffset: 2, totalAtoms: 15, fraction: 2 / 15 },
+    });
+    assert.equal(store.getState().restore.status, "pending");
+    store.nextPage();
+    assert.equal(store.getState().restore.status, "idle");
+    assert.equal(store.getState().restore.point, null);
   });
 });
 
@@ -203,6 +298,25 @@ describe("createReaderStore — reportPosition", () => {
     assert.deepEqual(changes.at(-1), point);
     assert.equal(progress.at(-1), 7 / 15);
   });
+
+  it("persists settled positions through StoragePort and deduplicates identical reports", async () => {
+    const writes: ReaderPosition[] = [];
+    const storage = memoryStorage(threeSectionEpub());
+    storage.setPosition = (_bookId, position) => {
+      writes.push(position);
+    };
+    const store = createReaderStore({ ports: { storage }, positionSaveDebounceMs: 0 });
+    await store.loadBook("book-1");
+    const point: ReaderPosition = {
+      version: 1,
+      locator: { spineIndex: 0, spineHref: store.getState().book!.sections[0].href, atomOffset: 2 },
+      progress: { globalAtomOffset: 2, totalAtoms: 15, fraction: 2 / 15 },
+    };
+    store.reportPosition(point);
+    store.reportPosition(point);
+    await store.flushPosition();
+    assert.deepEqual(writes, [point]);
+  });
 });
 
 describe("createReaderStore — subscribe & flow", () => {
@@ -226,5 +340,19 @@ describe("createReaderStore — subscribe & flow", () => {
     const s = store.getState();
     assert.equal(s.spineIndex, 2);
     assert.equal(s.pendingFragment, "frag-1");
+  });
+
+  it("queues the current atom as a restore target when switching flow", async () => {
+    const store = await loadedStore();
+    const point = {
+      version: 1 as const,
+      locator: { spineIndex: 1, spineHref: store.getState().book!.sections[1].href, atomOffset: 3 },
+      progress: { globalAtomOffset: 8, totalAtoms: 15, fraction: 8 / 15 },
+    };
+    store.reportPosition(point);
+    store.setFlowMode("continuous");
+    assert.equal(store.getState().flow, "continuous");
+    assert.equal(store.getState().restore.status, "pending");
+    assert.deepEqual(store.getState().restore.point?.locator, point.locator);
   });
 });

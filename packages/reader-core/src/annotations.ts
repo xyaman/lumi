@@ -7,10 +7,11 @@
 //     renderer repositions it on page turn / scroll and hides it off-page.
 // Framework-neutral: no app imports, no DOM assumptions beyond the render tree.
 
-import { atomToRange, collectAtomUnits, pointToAtom } from "./atomMap";
+import { type AtomUnit, atomToRange, collectAtomUnits, pointToAtom } from "./atomMap";
 import type { HighlightSpan } from "./types";
 
 const HIGHLIGHT_NAME = "lumi-highlight";
+const painterRanges = new Map<AnnotationPainter, Range[]>();
 const LAYER_CSS = "position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:5";
 // 20px filled bookmark (matches the ttu reader's `BookmarkSimple` at `size-5`).
 const MARK_SIZE = 20;
@@ -28,6 +29,8 @@ export type PaintSection = {
   spineIndex: number;
   content: HTMLElement;
   atomCount: number;
+  /** Stable atom walk for the current mounted DOM. */
+  atomUnits?: AtomUnit[];
 };
 
 /** How a page-mark icon is positioned once its page is on screen. */
@@ -56,6 +59,18 @@ function makeHighlight(ranges: Range[]): object | null {
   return ctor ? new ctor(...ranges) : null;
 }
 
+function updateHighlightRegistry(): void {
+  const registry = highlightRegistry();
+  if (!registry) return;
+  const ranges = [...painterRanges.values()].flat();
+  if (ranges.length === 0) {
+    registry.delete(HIGHLIGHT_NAME);
+    return;
+  }
+  const highlight = makeHighlight(ranges);
+  if (highlight) registry.set(HIGHLIGHT_NAME, highlight);
+}
+
 /** Paints one render's annotations; owns the page-mark overlay and the Custom Highlight registration. */
 export class AnnotationPainter {
   private layer: HTMLElement | undefined;
@@ -75,12 +90,8 @@ export class AnnotationPainter {
         if (range) ranges.push(range);
       }
     }
-    if (ranges.length === 0) {
-      registry.delete(HIGHLIGHT_NAME);
-      return;
-    }
-    const highlight = makeHighlight(ranges);
-    if (highlight) registry.set(HIGHLIGHT_NAME, highlight);
+    painterRanges.set(this, ranges);
+    updateHighlightRegistry();
   }
 
   /**
@@ -131,7 +142,8 @@ export class AnnotationPainter {
 
   /** Release the Custom Highlight registration and remove the overlay. */
   destroy(): void {
-    highlightRegistry()?.delete(HIGHLIGHT_NAME);
+    painterRanges.delete(this);
+    updateHighlightRegistry();
     this.layer?.remove();
     this.layer = undefined;
   }
@@ -157,13 +169,13 @@ function rangeForSpan(section: PaintSection, span: HighlightSpan): Range | null 
   const startAtom = span.start.spineIndex < section.spineIndex ? 0 : span.start.atomOffset;
   const endAtom = span.end.spineIndex > section.spineIndex ? section.atomCount : span.end.atomOffset;
   if (endAtom <= startAtom) return null;
-  return atomToRange(section.content, startAtom, endAtom);
+  return atomToRange(section.content, startAtom, endAtom, section.atomUnits);
 }
 
 /** On-screen rect of the atom a collapsed mark points at (spans one atom for a stable rect). */
 function markRect(section: PaintSection, atomOffset: number): DOMRect | null {
   const atom = Math.max(0, Math.min(atomOffset, Math.max(section.atomCount - 1, 0)));
-  const range = atomToRange(section.content, atom, atom + 1);
+  const range = atomToRange(section.content, atom, atom + 1, section.atomUnits);
   if (!range) return null;
   return firstUsableRect(range);
 }
@@ -211,10 +223,16 @@ export function spanCoversAtom(span: HighlightSpan, spineIndex: number, atom: nu
 }
 
 /** Section-local atom under a viewport point, or `null`. Best-effort: uses the platform caret-from-point API. */
-export function atomAtClientPoint(doc: Document, content: HTMLElement, clientX: number, clientY: number): number | null {
+export function atomAtClientPoint(
+  doc: Document,
+  content: HTMLElement,
+  clientX: number,
+  clientY: number,
+  units: AtomUnit[] = collectAtomUnits(content),
+): number | null {
   const caret = caretPoint(doc, clientX, clientY);
   if (!caret || !content.contains(caret.node)) return null;
-  return pointToAtom(content, caret.node, caret.offset, "start", collectAtomUnits(content));
+  return pointToAtom(content, caret.node, caret.offset, "start", units);
 }
 
 type CaretPoint = { node: Node; offset: number };

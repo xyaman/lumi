@@ -27,6 +27,7 @@ export interface ReaderRenderer {
   applyPage?(): void;
   applyPendingRestore?(): Promise<void | boolean>;
   applyTextColor?(): void;
+  applyHighlights?(): void;
   scheduleLayoutRefresh?(): void;
   scrollToCurrentTarget?(): void;
 }
@@ -77,6 +78,7 @@ type Watched = {
   navigationSeq: number;
   restoreToken: number;
   restoreStatus: ReaderState["restore"]["status"];
+  highlights: ReaderState["highlights"];
 };
 
 function watch(s: ReaderState): Watched {
@@ -88,6 +90,7 @@ function watch(s: ReaderState): Watched {
     navigationSeq: s.navigationSeq,
     restoreToken: s.restore.token,
     restoreStatus: s.restore.status,
+    highlights: s.highlights,
   };
 }
 
@@ -110,9 +113,7 @@ export class ReaderController {
   private scheduled = false;
   private prev: Watched | undefined;
   private lastSettings: ReaderSettings | undefined;
-  // Settings changes are ignored until the first content render lands; the initial render already
-  // reflects current settings, so the wrapper's mount-time settings effect must not trigger a
-  // redundant re-render/relayout.
+  private pendingSettingsBase: ReaderSettings | undefined;
   private started = false;
 
   constructor(options: ReaderControllerOptions) {
@@ -138,6 +139,8 @@ export class ReaderController {
     this.active = this.slot = this.host = undefined;
     this.activeFlow = undefined;
     this.started = false;
+    this.lastSettings = undefined;
+    this.pendingSettingsBase = undefined;
   }
 
   // Diff the current settings snapshot against the last and route to the cheapest renderer update (mirrors `reconcile()`'s store-delta routing). The wrapper runs this in an effect that reads `settings.get()`, so it re-runs on any settings change.
@@ -154,15 +157,23 @@ export class ReaderController {
     const prev = this.lastSettings;
     this.lastSettings = next;
     const active = this.active;
-    if (!this.started || !prev || !active) return;
+    if (!prev || !active) return;
+    if (!this.started) {
+      this.pendingSettingsBase ??= prev;
+      return;
+    }
 
+    this.applySettingsDiff(active, prev, next);
+  }
+
+  private applySettingsDiff(active: ReaderRenderer, prev: ReaderSettings, next: ReaderSettings): void {
     // CSS source changed → full rebuild (both renderers).
     if (prev.publisherStyles !== next.publisherStyles) {
       void active.render();
       return;
     }
 
-    const layout = layoutChanged(prev, next);
+    const layout = layoutChanged(prev, next, this.activeFlow ?? "paginated");
     const color = prev.forceTextColor !== next.forceTextColor;
 
     if (this.activeFlow === "paginated") {
@@ -215,7 +226,7 @@ export class ReaderController {
         void active.applyPendingRestore?.(); // restore within the current chapter
       }
     } else {
-      // Continuous: everything is rendered; navigation and restore are seeks.
+      // Continuous navigation and restore are renderer-owned seeks (including window shifts).
       // `spineIndex` alone changes on passive scroll, so only act on `navigationSeq`.
       if (cur.navigationSeq !== prev.navigationSeq) {
         active.scrollToCurrentTarget?.();
@@ -223,6 +234,8 @@ export class ReaderController {
         void active.applyPendingRestore?.();
       }
     }
+
+    if (cur.highlights !== prev.highlights) active.applyHighlights?.();
   }
 
   private restoreQueued(cur: Watched, prev: Watched): boolean {
@@ -231,7 +244,13 @@ export class ReaderController {
 
   private async render(active: ReaderRenderer): Promise<void> {
     await active.render();
+    if (this.active !== active || !this.host) return;
     this.started = true;
+
+    const base = this.pendingSettingsBase;
+    const latest = this.lastSettings;
+    this.pendingSettingsBase = undefined;
+    if (base && latest) this.applySettingsDiff(active, base, latest);
   }
 
   /** Ensure `active` matches `flow`, mounting a fresh renderer into a fresh slot on a switch. Returns `true` when the active renderer changed (caller forces a render). */
@@ -262,14 +281,12 @@ export class ReaderController {
 }
 
 /** Geometry-affecting settings (continuous can refresh these in place). */
-function layoutChanged(a: ReaderSettings, b: ReaderSettings): boolean {
-  return (
+function layoutChanged(a: ReaderSettings, b: ReaderSettings, flow: ReaderState["flow"]): boolean {
+  const shared =
     a.fontSizePx !== b.fontSizePx ||
     a.fontId !== b.fontId ||
     a.lineHeight !== b.lineHeight ||
     a.sideMarginPct !== b.sideMarginPct ||
-    a.blockMarginPct !== b.blockMarginPct ||
-    a.pageColumns !== b.pageColumns ||
-    a.readingDirection !== b.readingDirection
-  );
+    a.blockMarginPct !== b.blockMarginPct;
+  return shared || (flow === "paginated" && (a.pageColumns !== b.pageColumns || a.readingDirection !== b.readingDirection));
 }

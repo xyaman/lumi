@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "lumi-reader",
@@ -20,7 +21,7 @@
     },
     "packages/epub": {
       "name": "@lostcoords/lumi-epub",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "devDependencies": {
         "@types/node": "^22.10.0",
         "@xmldom/xmldom": "^0.9.8",
@@ -30,9 +31,9 @@
     },
     "packages/reader-core": {
       "name": "@lostcoords/lumi-reader-core",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
-        "@lostcoords/lumi-epub": "workspace:*",
+        "@lostcoords/lumi-epub": "^0.2.0",
       },
       "devDependencies": {
         "@happy-dom/global-registrator": "^15.11.0",
@@ -43,10 +44,10 @@
     },
     "packages/reader-react": {
       "name": "@lostcoords/lumi-reader-react",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
-        "@lostcoords/lumi-epub": "workspace:*",
-        "@lostcoords/lumi-reader-core": "workspace:*",
+        "@lostcoords/lumi-epub": "^0.2.0",
+        "@lostcoords/lumi-reader-core": "^0.2.0",
         "use-sync-external-store": "^1.6.0",
       },
       "devDependencies": {

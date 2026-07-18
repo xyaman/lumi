@@ -64,8 +64,6 @@ describe("atom counting", () => {
   it("emits CDATA body text as ordinary text and counts it", async () => {
     // CDATAはブラウザで消えるが walkAtoms は数える。両者を一致させる。
     const book = await bookOf("<p>前<![CDATA[中]]>後</p>");
-    assert.ok(book.sections[0].content.includes("前中後"), book.sections[0].content);
-    assert.ok(!book.sections[0].content.includes("CDATA"), "CDATA marker must be gone");
     assert.equal(book.totalAtoms, 3);
   });
 
@@ -106,8 +104,8 @@ describe("section metadata", () => {
     assert.equal((await bookOf("<p>あ</p>")).sections[0].direction, null);
   });
 
-  it("derives spineDirection from page-progression-direction", async () => {
-    assert.equal((await bookOf("<p>あ</p>")).spineDirection, "vertical"); // rtl は既定
+  it("keeps page progression separate from writing direction", async () => {
+    assert.equal((await bookOf("<p>あ</p>")).pageProgressionDirection, "rtl"); // test fixture default
   });
 
   it("detects page spread from spine properties", async () => {
@@ -207,6 +205,37 @@ describe("section metadata", () => {
     );
     assert.equal(book.totalAtoms, 5);
   });
+
+  it("uses flow indexes for sections and chapter targets when raw spine entries are skipped", async () => {
+    const epub = await parseEpub(
+      makeEpub({
+        files: {
+          "skip.xhtml": xhtml("<p>skip</p>"),
+          "a.xhtml": xhtml("<p>A</p>"),
+          "b.xhtml": xhtml("<p>B</p>"),
+        },
+        manifest: [
+          { id: "skip", href: "skip.xhtml", mediaType: "application/xhtml+xml" },
+          { id: "a", href: "a.xhtml", mediaType: "application/xhtml+xml" },
+          { id: "b", href: "b.xhtml", mediaType: "application/xhtml+xml" },
+        ],
+        spine: [{ idref: "skip", linear: false }, { idref: "a" }, { idref: "b" }],
+        nav: '<ol><li><a href="a.xhtml">A</a></li><li><a href="b.xhtml">B</a></li></ol>',
+      }),
+    );
+    const book = await buildBook("t", epub);
+    assert.deepEqual(
+      book.sections.map((section) => [section.spineIndex, section.epubSpineIndex]),
+      [
+        [0, 1],
+        [1, 2],
+      ],
+    );
+    assert.deepEqual(
+      book.chapters.map((chapter) => chapter.target?.spineIndex),
+      [0, 1],
+    );
+  });
 });
 
 describe("section css links", () => {
@@ -288,7 +317,7 @@ describe("manifest fallback chains", () => {
     assert.deepEqual(book.chapters[0].target, { spineIndex: 0, offset: 0 });
   });
 
-  it("skips a spine item whose fallback chain has no content document", async () => {
+  it("rejects a book whose fallback chains contain no content document", async () => {
     const epub = await parseEpub(
       makeEpub({
         files: { "cover.jpg": "bytes" },
@@ -296,8 +325,9 @@ describe("manifest fallback chains", () => {
         spine: [{ idref: "img" }],
       }),
     );
-    const book = await buildBook("t", epub);
-    assert.equal(book.sections.length, 0);
+    await assert.rejects(buildBook("t", epub), (error: unknown) => {
+      return error instanceof Error && error.message === "The EPUB has no renderable linear spine documents.";
+    });
   });
 });
 

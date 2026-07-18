@@ -9,6 +9,7 @@ export type ZipEntry = {
   uncompressedSize: number;
   method: number; // 0 = stored, 8 = deflate; anything else is rejected
   localHeaderOffset: number;
+  flags: number;
 };
 
 /** Lazy ZIP reader keyed by entry name. */
@@ -26,11 +27,13 @@ const textDecoder = new TextDecoder("utf-8");
 
 // EOCD sits at the file end. Min 22 bytes; up to 65535 bytes of comment may follow.
 const EOCD_MAX_SCAN = 22 + 65535;
+const MAX_ENTRY_UNCOMPRESSED = 512 * 1024 * 1024;
+const MAX_TOTAL_UNCOMPRESSED = 2 * 1024 * 1024 * 1024;
 
 /** Open an EPUB-style ZIP. Enforces the EPUB-specific `mimetype` entry up-front; everything else is read on demand. */
 export async function openZip(blob: Blob): Promise<ZipReader> {
   const eocd = await findEocd(blob);
-  const entries = await readCentralDirectory(blob, eocd.cdOffset, eocd.cdSize);
+  const entries = await readCentralDirectory(blob, eocd.cdOffset, eocd.cdSize, eocd.entryCount);
 
   const mimeEntry = entries.get("mimetype");
   if (!mimeEntry) {
@@ -60,7 +63,7 @@ export async function openZip(blob: Blob): Promise<ZipReader> {
 }
 
 /** Locate the EOCD record. Walks backward from EOF because the spec allows up to 64KB of trailing comment. */
-async function findEocd(blob: Blob): Promise<{ cdOffset: number; cdSize: number }> {
+async function findEocd(blob: Blob): Promise<{ cdOffset: number; cdSize: number; entryCount: number }> {
   if (blob.size < 22) {
     fail("not-zip", "The file is too small to be a valid ZIP archive.");
   }
@@ -78,19 +81,36 @@ async function findEocd(blob: Blob): Promise<{ cdOffset: number; cdSize: number 
       const view = new DataView(buf.buffer, buf.byteOffset + i, 22);
       // Confirm via DataView too — guards against false matches inside the comment field.
       if (view.getUint32(0, true) !== EOCD_SIG) continue;
+      const commentLength = view.getUint16(20, true);
+      if (i + 22 + commentLength !== buf.length) continue;
+      const disk = view.getUint16(4, true);
+      const centralDisk = view.getUint16(6, true);
+      const entriesOnDisk = view.getUint16(8, true);
+      const entryCount = view.getUint16(10, true);
+      if (disk !== 0 || centralDisk !== 0 || entriesOnDisk !== entryCount) {
+        fail("not-zip", "Multi-disk ZIP archives are not supported.");
+      }
       const cdSize = view.getUint32(12, true);
       const cdOffset = view.getUint32(16, true);
       if (cdSize === ZIP64_SENTINEL || cdOffset === ZIP64_SENTINEL) {
         fail("not-zip", "ZIP64 archives are not supported.");
       }
-      return { cdOffset, cdSize };
+      if (cdOffset + cdSize > blob.size || cdOffset + cdSize > blob.size - tailLen + i) {
+        fail("not-zip", "The ZIP central directory points outside the archive.");
+      }
+      return { cdOffset, cdSize, entryCount };
     }
   }
   fail("not-zip", "The file is not a valid ZIP archive (no end-of-central-directory record found).");
 }
 
 /** Read every central-directory entry into an in-memory index. The CD is small (a few KB) so eager load is fine. */
-async function readCentralDirectory(blob: Blob, offset: number, size: number): Promise<Map<string, ZipEntry>> {
+async function readCentralDirectory(
+  blob: Blob,
+  offset: number,
+  size: number,
+  expectedEntries: number,
+): Promise<Map<string, ZipEntry>> {
   let buf: Uint8Array;
   try {
     buf = new Uint8Array(await blob.slice(offset, offset + size).arrayBuffer());
@@ -101,17 +121,21 @@ async function readCentralDirectory(blob: Blob, offset: number, size: number): P
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const entries = new Map<string, ZipEntry>();
   let p = 0;
+  let totalUncompressed = 0;
 
   while (p + 46 <= buf.length) {
     if (view.getUint32(p, true) !== CD_SIG) break;
 
     const method = view.getUint16(p + 10, true);
+    const flags = view.getUint16(p + 8, true);
     const compressedSize = view.getUint32(p + 20, true);
     const uncompressedSize = view.getUint32(p + 24, true);
     const nameLen = view.getUint16(p + 28, true);
     const extraLen = view.getUint16(p + 30, true);
     const commentLen = view.getUint16(p + 32, true);
     const localHeaderOffset = view.getUint32(p + 42, true);
+    const recordEnd = p + 46 + nameLen + extraLen + commentLen;
+    if (recordEnd > buf.length) fail("not-zip", "A central-directory entry is truncated.");
 
     if (
       compressedSize === ZIP64_SENTINEL ||
@@ -120,11 +144,25 @@ async function readCentralDirectory(blob: Blob, offset: number, size: number): P
     ) {
       fail("not-zip", "ZIP64 archives are not supported.");
     }
+    if ((flags & 1) !== 0) fail("not-zip", "Encrypted ZIP entries are not supported.");
+    if (method !== 0 && method !== 8) fail("not-zip", `Unsupported compression method ${method}.`);
+    if (uncompressedSize > MAX_ENTRY_UNCOMPRESSED) {
+      fail("not-zip", `ZIP entry exceeds the ${MAX_ENTRY_UNCOMPRESSED}-byte safety limit.`);
+    }
+    totalUncompressed += uncompressedSize;
+    if (totalUncompressed > MAX_TOTAL_UNCOMPRESSED) {
+      fail("not-zip", `ZIP contents exceed the ${MAX_TOTAL_UNCOMPRESSED}-byte safety limit.`);
+    }
 
     const name = decodeText(buf.subarray(p + 46, p + 46 + nameLen));
-    entries.set(name, { name, compressedSize, uncompressedSize, method, localHeaderOffset });
+    if (entries.has(name)) fail("not-zip", `The ZIP contains duplicate entries named "${name}".`);
+    entries.set(name, { name, compressedSize, uncompressedSize, method, localHeaderOffset, flags });
 
-    p += 46 + nameLen + extraLen + commentLen;
+    p = recordEnd;
+  }
+
+  if (entries.size !== expectedEntries || p !== buf.length) {
+    fail("not-zip", "The ZIP central directory is incomplete or inconsistent.");
   }
 
   return entries;
@@ -148,8 +186,16 @@ async function readEntry(blob: Blob, entry: ZipEntry): Promise<Uint8Array> {
   }
   const nameLen = view.getUint16(26, true);
   const extraLen = view.getUint16(28, true);
+  const localFlags = view.getUint16(6, true);
+  const localMethod = view.getUint16(8, true);
+  if (localFlags !== entry.flags || localMethod !== entry.method) {
+    fail("not-zip", `Local and central ZIP metadata disagree for "${entry.name}".`);
+  }
   const dataStart = entry.localHeaderOffset + 30 + nameLen + extraLen;
   const dataEnd = dataStart + entry.compressedSize;
+  if (dataStart < 0 || dataEnd > blob.size || dataEnd < dataStart) {
+    fail("not-zip", `The data range for "${entry.name}" points outside the archive.`);
+  }
 
   let compressed: Uint8Array;
   try {
@@ -158,10 +204,15 @@ async function readEntry(blob: Blob, entry: ZipEntry): Promise<Uint8Array> {
     fail("not-zip", `Could not read the data for "${entry.name}".`, { cause });
   }
 
-  if (entry.method === 0) return compressed;
+  if (entry.method === 0) {
+    if (compressed.length !== entry.uncompressedSize) fail("not-zip", `Stored size mismatch for "${entry.name}".`);
+    return compressed;
+  }
   if (entry.method === 8) {
     try {
-      return await inflateRaw(compressed);
+      const inflated = await inflateRaw(compressed);
+      if (inflated.length !== entry.uncompressedSize) fail("not-zip", `Inflated size mismatch for "${entry.name}".`);
+      return inflated;
     } catch (cause) {
       fail("not-zip", `Failed to inflate "${entry.name}".`, { cause });
     }

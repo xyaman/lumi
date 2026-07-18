@@ -13,7 +13,7 @@ const SKIPPED = new Set(["rt", "rp", "script", "style"]);
 
 /** A text node segment (1 atom per code point) or a replaced element (1 atom). */
 export type AtomUnit =
-  | { kind: "text"; node: Text; atomStart: number; atomEnd: number }
+  | { kind: "text"; node: Text; atomStart: number; atomEnd: number; /** False enables O(1) UTF-16 ⇄ atom conversion for ordinary BMP text. */ hasAstral?: boolean }
   | { kind: "replaced"; node: Element; atomStart: number; atomEnd: number };
 
 /** A resolved DOM point (container node + offset), as consumed by Range APIs. */
@@ -28,15 +28,51 @@ function isWhitespaceOnly(text: string): boolean {
 }
 
 /** UTF-16 offset within a text node → code points before that offset. */
-function codePointsBefore(text: string, utf16Offset: number): number {
-  return [...text.slice(0, utf16Offset)].length;
+function codePointsBefore(text: string, utf16Offset: number, hasAstral?: boolean): number {
+  const end = Math.max(0, Math.min(Math.floor(utf16Offset), text.length));
+  if (hasAstral === false) return end;
+  let count = 0;
+  for (let i = 0; i < end; i++, count++) {
+    const first = text.charCodeAt(i);
+    if (first >= 0xd800 && first <= 0xdbff && i + 1 < end) {
+      const second = text.charCodeAt(i + 1);
+      if (second >= 0xdc00 && second <= 0xdfff) i++;
+    }
+  }
+  return count;
 }
 
 /** Nth code point within a text node → UTF-16 offset (what Range APIs expect). */
-function utf16OffsetForCodePoint(text: string, codePoints: number): number {
-  const arr = [...text];
-  const clamped = Math.max(0, Math.min(codePoints, arr.length));
-  return arr.slice(0, clamped).join("").length;
+function utf16OffsetForCodePoint(text: string, codePoints: number, hasAstral?: boolean): number {
+  const target = Math.max(0, Math.floor(codePoints));
+  if (hasAstral === false) return Math.min(target, text.length);
+  let seen = 0;
+  let i = 0;
+  while (i < text.length && seen < target) {
+    const first = text.charCodeAt(i++);
+    if (first >= 0xd800 && first <= 0xdbff && i < text.length) {
+      const second = text.charCodeAt(i);
+      if (second >= 0xdc00 && second <= 0xdfff) i++;
+    }
+    seen++;
+  }
+  return i;
+}
+
+function analyzeText(text: string): { length: number; hasAstral: boolean } {
+  let length = 0;
+  let hasAstral = false;
+  for (let i = 0; i < text.length; i++, length++) {
+    const first = text.charCodeAt(i);
+    if (first >= 0xd800 && first <= 0xdbff && i + 1 < text.length) {
+      const second = text.charCodeAt(i + 1);
+      if (second >= 0xdc00 && second <= 0xdfff) {
+        hasAstral = true;
+        i++;
+      }
+    }
+  }
+  return { length, hasAstral };
 }
 
 function indexInParent(node: Node): number {
@@ -62,8 +98,8 @@ export function collectAtomUnits(container: Node): AtomUnit[] {
       if (type === TEXT_NODE || type === CDATA_NODE) {
         const text = child.nodeValue ?? "";
         if (isWhitespaceOnly(text)) continue;
-        const length = [...text].length;
-        units.push({ kind: "text", node: child as Text, atomStart: atom, atomEnd: atom + length });
+        const { length, hasAstral } = analyzeText(text);
+        units.push({ kind: "text", node: child as Text, atomStart: atom, atomEnd: atom + length, hasAstral });
         atom += length;
         continue;
       }
@@ -103,7 +139,7 @@ export function pointToAtom(
   if (node.nodeType === TEXT_NODE || node.nodeType === CDATA_NODE) {
     const unit = units.find((u) => u.node === node);
     if (unit && unit.kind === "text") {
-      return unit.atomStart + codePointsBefore(node.nodeValue ?? "", offset);
+      return unit.atomStart + codePointsBefore(node.nodeValue ?? "", offset, unit.hasAstral);
     }
     // Whitespace-only text node (no entry in `units`): fall through to element-level logic.
   }
@@ -120,25 +156,36 @@ export function atomToPoint(
   atom: number,
   units: AtomUnit[] = collectAtomUnits(container),
 ): DomPoint | null {
-  for (const unit of units) {
-    if (atom < unit.atomStart || atom > unit.atomEnd) continue;
-
-    if (unit.kind === "text") {
-      const text = unit.node.nodeValue ?? "";
-      return { node: unit.node, offset: utf16OffsetForCodePoint(text, atom - unit.atomStart) };
-    }
-    // Replaced element: a boundary in its parent, before or after the element.
-    const parent = unit.node.parentNode;
-    if (!parent) return null;
-    const index = indexInParent(unit.node);
-    return { node: parent, offset: atom === unit.atomStart ? index : index + 1 };
+  let lo = 0;
+  let hi = units.length;
+  // First unit whose inclusive end boundary reaches `atom`. Using the first match
+  // preserves the previous behavior at a boundary shared by adjacent units.
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (units[mid].atomEnd >= atom) hi = mid;
+    else lo = mid + 1;
   }
-  return null;
+  const unit = units[lo];
+  if (!unit || atom < unit.atomStart || atom > unit.atomEnd) return null;
+
+  if (unit.kind === "text") {
+    const text = unit.node.nodeValue ?? "";
+    return { node: unit.node, offset: utf16OffsetForCodePoint(text, atom - unit.atomStart, unit.hasAstral) };
+  }
+  // Replaced element: a boundary in its parent, before or after the element.
+  const parent = unit.node.parentNode;
+  if (!parent) return null;
+  const index = indexInParent(unit.node);
+  return { node: parent, offset: atom === unit.atomStart ? index : index + 1 };
 }
 
 /** `[startAtom, endAtom]` span within one mounted section → a live `Range`, or `null` when the span is collapsed (e.g. page marks — never painted). */
-export function atomToRange(container: Node, startAtom: number, endAtom: number): Range | null {
-  const units = collectAtomUnits(container);
+export function atomToRange(
+  container: Node,
+  startAtom: number,
+  endAtom: number,
+  units: AtomUnit[] = collectAtomUnits(container),
+): Range | null {
   const start = atomToPoint(container, startAtom, units);
   const end = atomToPoint(container, endAtom, units);
   if (!start || !end) return null;

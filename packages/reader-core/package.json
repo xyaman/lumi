@@ -1,6 +1,6 @@
 {
   "name": "@lostcoords/lumi-reader-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Framework-agnostic EPUB reader engine: atom-offset positioning, highlight anchoring, neutral store, injected ports",
   "type": "module",
   "main": "./dist/index.js",
@@ -35,7 +35,7 @@
     "test:watch": "tsx --conditions development --test --watch test/*.test.ts"
   },
   "dependencies": {
-    "@lostcoords/lumi-epub": "workspace:*"
+    "@lostcoords/lumi-epub": "^0.2.0"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^15.11.0",

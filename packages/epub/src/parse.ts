@@ -81,16 +81,18 @@ type ReadNavArgs = {
 
 async function readNav(args: ReadNavArgs): Promise<NavResult> {
   const { zip, manifest, navId, ncxId, warn } = args;
+  let navLandmarks: NavResult["landmarks"] = [];
 
   if (navId) {
     const item = manifest.get(navId);
     const text = item && (await zip.readText(item.href));
     if (item && text) {
       const { toc, landmarks } = parseNav(text, item.href, warn);
+      navLandmarks = landmarks;
       if (isUsableToc(toc, manifest)) return { toc, landmarks };
       warn.add(
         "unusable-nav-hrefs",
-        `Most TOC hrefs in \`${item.href}\` do not resolve to manifest items. Falling back to NCX if available.`,
+        `The TOC in \`${item.href}\` is empty or most of its hrefs do not resolve to manifest items. Falling back to NCX if available.`,
         item.href,
       );
     }
@@ -98,17 +100,17 @@ async function readNav(args: ReadNavArgs): Promise<NavResult> {
     warn.add("missing-nav-document", "No EPUB 3 navigation document was declared. Falling back to NCX if available.");
   }
 
-  const ncxItem = ncxId ? manifest.get(ncxId) : findNcxItem(manifest);
+  let ncxItem = ncxId ? manifest.get(ncxId) : undefined;
   if (ncxId && !ncxItem) {
     warn.add("missing-ncx", `Spine references toc="${ncxId}" but no such manifest item exists.`);
-    return { toc: [], landmarks: [] };
   }
+  ncxItem ??= findNcxItem(manifest);
   if (ncxItem) {
     const text = await zip.readText(ncxItem.href);
-    if (text) return { toc: parseNcx(text, ncxItem.href, warn), landmarks: [] };
+    if (text) return { toc: parseNcx(text, ncxItem.href, warn), landmarks: navLandmarks };
   }
 
-  return { toc: [], landmarks: [] };
+  return { toc: [], landmarks: navLandmarks };
 }
 
 /** True when enough TOC hrefs resolve to a manifest item to be navigable. */
@@ -131,7 +133,7 @@ function isUsableToc(toc: NavPoint[], manifest: Map<string, ManifestItem>): bool
   };
 
   walk(toc);
-  return total === 0 || matched / total >= 0.5;
+  return total > 0 && matched / total >= 0.5;
 }
 
 /** Locate the EPUB 2 NCX item in the manifest. Fallback path when no nav document is declared. */

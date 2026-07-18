@@ -3,11 +3,23 @@
 /** Resolve `href` against `baseDir` (a ZIP-internal directory). Returns the ZIP-absolute path, or `undefined` if `..` escapes the root (zip-slip protection). */
 export function resolveHref(baseDir: string, href: string): string | undefined {
   const trimmedHref = href.trim();
+  // ZIP resources are paths, never network or application URLs.
+  if (/^[a-z][a-z\d+.-]*:/i.test(trimmedHref) || trimmedHref.startsWith("//")) return undefined;
   const hashIndex = trimmedHref.indexOf("#");
-  const cleanHref = hashIndex === -1 ? trimmedHref : trimmedHref.slice(0, hashIndex);
+  const withoutFragment = hashIndex === -1 ? trimmedHref : trimmedHref.slice(0, hashIndex);
+  const queryIndex = withoutFragment.indexOf("?");
+  const cleanHref = queryIndex === -1 ? withoutFragment : withoutFragment.slice(0, queryIndex);
 
-  const segments = baseDir ? baseDir.split("/").filter(Boolean) : [];
-  for (const part of cleanHref.split("/")) {
+  let decodedHref: string;
+  try {
+    decodedHref = decodeURIComponent(cleanHref);
+  } catch {
+    decodedHref = cleanHref;
+  }
+  decodedHref = decodedHref.replace(/\\/g, "/");
+
+  const segments = decodedHref.startsWith("/") ? [] : baseDir ? baseDir.split("/").filter(Boolean) : [];
+  for (const part of decodedHref.split("/")) {
     if (part === "" || part === ".") continue;
     if (part === "..") {
       if (segments.length === 0) return undefined; // escaped the root
@@ -17,14 +29,7 @@ export function resolveHref(baseDir: string, href: string): string | undefined {
     segments.push(part);
   }
 
-  let resolved: string;
-  try {
-    resolved = segments.map(decodeURIComponent).join("/");
-  } catch {
-    // Bad percent-encoding — fall back to literal segments joined.
-    resolved = segments.join("/");
-  }
-  return resolved;
+  return segments.join("/");
 }
 
 /** Directory portion of a ZIP-absolute path (no trailing slash). */

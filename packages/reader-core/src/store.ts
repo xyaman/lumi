@@ -4,7 +4,7 @@
 import { type Book, buildBook, parseEpub } from "@lostcoords/lumi-epub";
 import { buildPosition } from "./positionBuilder";
 import type { ReaderPorts } from "./ports";
-import type { FlowMode, HighlightSpan, ReaderPosition } from "./types";
+import { type FlowMode, type HighlightSpan, isReaderPosition, type ReaderPosition } from "./types";
 
 /** Top-level status of the load lifecycle. */
 export type LoadStatus = "idle" | "loading" | "ready" | "error";
@@ -88,12 +88,16 @@ export type ReaderStore = {
   setHighlights(spans: HighlightSpan[]): void;
   /** Renderer→host: a painted highlight was activated (tapped). */
   activateHighlight(id: string): void;
+  /** Flush the debounced position write, for page-hide/app shutdown and before switching books. */
+  flushPosition(): Promise<void>;
 };
 
 /** Configuration for `createReaderStore`. */
 export type ReaderStoreConfig = {
   ports: ReaderPorts;
   initialFlow?: FlowMode;
+  /** Debounce applied to `StoragePort.setPosition`; defaults to 250ms. Set to 0 for synchronous scheduling in tests. */
+  positionSaveDebounceMs?: number;
 };
 
 function emptyPaginated(): PaginatedState {
@@ -132,6 +136,22 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
   };
 
   const listeners = new Set<(state: ReaderState) => void>();
+  const positionSaveDebounceMs = Math.max(0, config.positionSaveDebounceMs ?? 250);
+  let positionSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingPositionSave: { bookId: string; position: ReaderPosition } | null = null;
+  let loadSequence = 0;
+  let activeLoad: { bookId: string; promise: Promise<void> } | null = null;
+  let openedBookId: string | null = null;
+
+  function notify(run: (callbacks: NonNullable<ReaderPorts["callbacks"]>) => void): void {
+    const callbacks = cb();
+    if (!callbacks) return;
+    try {
+      run(callbacks);
+    } catch {
+      // Host notifications are observers. They must not corrupt reader state or fail a book load.
+    }
+  }
 
   function emit(): void {
     for (const l of listeners) l(state);
@@ -155,7 +175,8 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
   }
 
   // Re-resolve a saved position by href (the spine can shift between sessions), then rebuild it against this book's atoms.
-  function normalize(book: Book, position: ReaderPosition): ReaderPosition | null {
+  function normalize(book: Book, position: unknown): ReaderPosition | null {
+    if (!isReaderPosition(position)) return null;
     const idx = resolveFlowIndex(book, position);
     if (idx === null) return null;
     return buildPosition(book, idx, position.locator.spineHref, position.locator.atomOffset) ?? position;
@@ -175,12 +196,54 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
       readingPoint: point,
       restore: { status: "pending", token: state.restore.token + 1, point },
     });
-    cb()?.onProgress?.(point.progress.fraction);
-    cb()?.onPositionChange?.(point);
+    notify((callbacks) => callbacks.onProgress?.(point.progress.fraction));
+  }
+
+  function cancelRestore(): RestoreState {
+    if (state.restore.status === "idle" && state.restore.point === null) return state.restore;
+    return { status: "idle", token: state.restore.token + 1, point: null };
+  }
+
+  function samePosition(a: ReaderPosition | null, b: ReaderPosition): boolean {
+    return (
+      !!a &&
+      a.locator.spineIndex === b.locator.spineIndex &&
+      a.locator.spineHref === b.locator.spineHref &&
+      a.locator.atomOffset === b.locator.atomOffset
+    );
+  }
+
+  function schedulePositionSave(position: ReaderPosition): void {
+    if (!state.bookId) return;
+    pendingPositionSave = { bookId: state.bookId, position };
+    if (positionSaveTimer !== undefined) clearTimeout(positionSaveTimer);
+    if (positionSaveDebounceMs === 0) {
+      void flushPosition();
+      return;
+    }
+    positionSaveTimer = setTimeout(() => void flushPosition(), positionSaveDebounceMs);
+  }
+
+  async function flushPosition(): Promise<void> {
+    if (positionSaveTimer !== undefined) clearTimeout(positionSaveTimer);
+    positionSaveTimer = undefined;
+    const pending = pendingPositionSave;
+    pendingPositionSave = null;
+    if (!pending) return;
+    try {
+      await ports.storage.setPosition(pending.bookId, pending.position);
+    } catch {
+      // Position persistence must never put an otherwise readable book into an error state.
+    }
   }
 
   function queueContinuousTarget(spineIndex: number, fragment: string | null): void {
-    set({ spineIndex, pendingFragment: fragment, navigationSeq: state.navigationSeq + 1 });
+    set({
+      spineIndex,
+      pendingFragment: fragment,
+      navigationSeq: state.navigationSeq + 1,
+      restore: cancelRestore(),
+    });
   }
 
   function setSpineIndex(i: number): void {
@@ -191,15 +254,31 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
     set({ spineIndex: clampIndex(state.book, i) });
   }
 
-  async function loadBook(bookId: string): Promise<void> {
-    const previousBookId = state.status === "idle" ? null : state.bookId;
-    if (previousBookId && previousBookId !== bookId) cb()?.onBookClosed?.(previousBookId);
+  function loadBook(bookId: string): Promise<void> {
+    if (activeLoad?.bookId === bookId) return activeLoad.promise;
+    const sequence = ++loadSequence;
+    const promise = performLoad(bookId, sequence);
+    activeLoad = { bookId, promise };
+    void promise.then(() => {
+      if (activeLoad?.promise === promise) activeLoad = null;
+    });
+    return promise;
+  }
+
+  async function performLoad(bookId: string, sequence: number): Promise<void> {
+    await flushPosition();
+    if (sequence !== loadSequence) return;
 
     if (state.status === "ready" && state.bookId === bookId && state.book) {
       await resume(bookId, state.book);
       return;
     }
-    if (state.status === "loading" && state.bookId === bookId) return;
+
+    if (openedBookId && openedBookId !== bookId) {
+      const previousBookId = openedBookId;
+      openedBookId = null;
+      notify((callbacks) => callbacks.onBookClosed?.(previousBookId));
+    }
 
     resetForLoad(bookId);
 
@@ -211,15 +290,16 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
       if (!blob) throw new Error(`Book file not found for id ${bookId}`);
       const epub = await parseEpub(blob);
       const book = await buildBook(bookId, epub);
-      if (state.status !== "loading" || state.bookId !== bookId) return; // stale load
+      if (sequence !== loadSequence || state.status !== "loading" || state.bookId !== bookId) return;
 
       const restorePoint = saved ? normalize(book, saved) : null;
       const clampedIndex = Math.max(Math.min(state.spineIndex, book.sections.length - 1), 0);
       set({ status: "ready", book, spineIndex: clampedIndex });
       if (restorePoint) queueRestore(book, restorePoint);
-      cb()?.onBookOpened?.(bookId);
+      openedBookId = bookId;
+      notify((callbacks) => callbacks.onBookOpened?.(bookId));
     } catch (e) {
-      if (state.status !== "loading" || state.bookId !== bookId) return;
+      if (sequence !== loadSequence || state.status !== "loading" || state.bookId !== bookId) return;
       set({ status: "error", error: e instanceof Error ? e.message : String(e) });
     }
   }
@@ -229,7 +309,12 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
       const p = normalize(book, state.readingPoint);
       if (p) queueRestore(book, p);
     }
-    const saved = await ports.storage.getPosition(bookId);
+    let saved: ReaderPosition | null = null;
+    try {
+      saved = await ports.storage.getPosition(bookId);
+    } catch {
+      // A persisted-position read is optional; the already-open book remains usable.
+    }
     if (state.status !== "ready" || state.bookId !== bookId) return;
     if (saved) {
       const p = normalize(book, saved);
@@ -262,15 +347,19 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
         spineIndex: next,
         navigationSeq: state.navigationSeq + 1,
         paginated: { ...state.paginated, pendingPage: "first" },
+        restore: cancelRestore(),
       });
     }
   }
 
   function prevChapter(): void {
     if (state.spineIndex > 0) {
-      patchPaginated({ pendingPage: "first" });
-      set({ navigationSeq: state.navigationSeq + 1 });
-      setSpineIndex(state.spineIndex - 1);
+      set({
+        spineIndex: state.spineIndex - 1,
+        navigationSeq: state.navigationSeq + 1,
+        paginated: { ...state.paginated, pendingPage: "first" },
+        restore: cancelRestore(),
+      });
     }
   }
 
@@ -279,6 +368,7 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
       set({
         navigationSeq: state.navigationSeq + 1,
         paginated: { ...state.paginated, pageInChapter: state.paginated.pageInChapter + 1 },
+        restore: cancelRestore(),
       });
     } else {
       nextChapter();
@@ -290,10 +380,15 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
       set({
         navigationSeq: state.navigationSeq + 1,
         paginated: { ...state.paginated, pageInChapter: state.paginated.pageInChapter - 1 },
+        restore: cancelRestore(),
       });
     } else if (state.spineIndex > 0) {
-      set({ navigationSeq: state.navigationSeq + 1, paginated: { ...state.paginated, pendingPage: "last" } });
-      setSpineIndex(state.spineIndex - 1);
+      set({
+        spineIndex: state.spineIndex - 1,
+        navigationSeq: state.navigationSeq + 1,
+        paginated: { ...state.paginated, pendingPage: "last" },
+        restore: cancelRestore(),
+      });
     }
   }
 
@@ -314,6 +409,7 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
       spineIndex: clampIndex(state.book, spineIndex),
       pendingFragment: fragment,
       paginated: { ...state.paginated, pendingPage: "first" },
+      restore: cancelRestore(),
     });
   }
 
@@ -334,6 +430,7 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
           ...state.paginated,
           pageInChapter: fragment ? (state.paginated.fragmentPages.get(fragment) ?? 0) : 0,
         },
+        restore: cancelRestore(),
       });
       return;
     }
@@ -348,7 +445,10 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
     },
     loadBook,
     setFlowMode(flow) {
+      if (flow === state.flow) return;
+      const point = state.book && state.readingPoint ? normalize(state.book, state.readingPoint) : null;
       set({ flow });
+      if (state.book && point) queueRestore(state.book, point);
     },
     nextPage,
     prevPage,
@@ -367,9 +467,11 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
       set({ restore: { ...state.restore, status } });
     },
     reportPosition(position) {
+      if (!isReaderPosition(position) || samePosition(state.readingPoint, position)) return;
       set({ readingPoint: position });
-      cb()?.onProgress?.(position.progress.fraction);
-      cb()?.onPositionChange?.(position);
+      schedulePositionSave(position);
+      notify((callbacks) => callbacks.onProgress?.(position.progress.fraction));
+      notify((callbacks) => callbacks.onPositionChange?.(position));
     },
     clearPendingFragment() {
       if (state.pendingFragment !== null) set({ pendingFragment: null });
@@ -381,7 +483,8 @@ export function createReaderStore(config: ReaderStoreConfig): ReaderStore {
       set({ highlights: spans });
     },
     activateHighlight(id) {
-      cb()?.onHighlightActivate?.(id);
+      notify((callbacks) => callbacks.onHighlightActivate?.(id));
     },
+    flushPosition,
   };
 }
